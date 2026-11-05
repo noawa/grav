@@ -1,31 +1,55 @@
 <?php
+
+/**
+ * @package    Grav\Common\Filesystem
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common\Filesystem;
 
-use Grav\Common\GravTrait;
+use Grav\Common\Grav;
+use RecursiveIterator;
+use SplFileInfo;
+use function in_array;
 
+/**
+ * Class RecursiveFolderFilterIterator
+ * @package Grav\Common\Filesystem
+ */
 class RecursiveFolderFilterIterator extends \RecursiveFilterIterator
 {
-    use GravTrait;
+    /** @var array */
+    protected static $ignore_folders;
 
-    protected static $folder_ignores;
-
-    public function __construct(\RecursiveIterator $iterator)
+    /**
+     * Create a RecursiveFilterIterator from a RecursiveIterator
+     *
+     * @param RecursiveIterator $iterator
+     * @param array $ignore_folders
+     */
+    public function __construct(RecursiveIterator $iterator, $ignore_folders = [])
     {
         parent::__construct($iterator);
-        if (empty($this::$folder_ignores)) {
-            $this::$folder_ignores = self::getGrav()['config']->get('system.pages.ignore_folders');
+
+        if (empty($ignore_folders)) {
+            $ignore_folders = Grav::instance()['config']->get('system.pages.ignore_folders');
         }
+
+        $this::$ignore_folders = $ignore_folders;
     }
 
-    public function accept()
+    /**
+     * Check whether the current element of the iterator is acceptable
+     *
+     * @return bool true if the current element is acceptable, otherwise false.
+     */
+    public function accept() :bool
     {
-
-        /** @var $current \SplFileInfo */
+        /** @var SplFileInfo $current */
         $current = $this->current();
 
-        if ($current->isDir() && !in_array($current->getFilename(), $this::$folder_ignores)) {
-            return true;
-        }
-        return false;
+        return $current->isDir() && !in_array($current->getFilename(), $this::$ignore_folders, true);
     }
 }

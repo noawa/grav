@@ -1,107 +1,181 @@
 <?php
+
+/**
+ * @package    Grav\Common\Page
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common\Page\Medium;
 
 use Grav\Common\File\CompiledYamlFile;
-use Grav\Common\GravTrait;
+use Grav\Common\Grav;
 use Grav\Common\Data\Data;
 use Grav\Common\Data\Blueprint;
+use Grav\Common\Media\Interfaces\MediaFileInterface;
+use Grav\Common\Media\Interfaces\MediaLinkInterface;
+use Grav\Common\Media\Traits\MediaFileTrait;
+use Grav\Common\Media\Traits\MediaObjectTrait;
 
 /**
- * The Medium is a general class for multimedia objects in Grav pages, specific implementations will derive from
+ * Class Medium
+ * @package Grav\Common\Page\Medium
  *
- * @author Grav
- * @license MIT
- *
+ * @property string $filepath
+ * @property string $filename
+ * @property string $basename
+ * @property string $mime
+ * @property int $size
+ * @property int $modified
+ * @property array $metadata
+ * @property int|string $timestamp
  */
-class Medium extends Data implements RenderableInterface
+class Medium extends Data implements RenderableInterface, MediaFileInterface
 {
-    use GravTrait;
+    use MediaObjectTrait;
+    use MediaFileTrait;
     use ParsedownHtmlTrait;
 
     /**
-     * @var string
+     * Media actions that may be invoked from an editor-authored Markdown image
+     * URL (e.g. `![x](img.png?resize=100,200&grayscale&class=foo)`) or a media
+     * URL request. Excerpts::processMediaActions() and the Flex media response
+     * builder call these by method name. The gate blocks any *real* public
+     * method that is not on this allowlist, so untrusted page content can't reach
+     * arbitrary methods on a medium (the enabler behind GHSA-ffmg-hfvg-jhg9 and
+     * the earlier style/attribute advisories). Names that aren't real methods
+     * still fall through to the medium's __call() handler, which only appends
+     * them to the image URL's querystring (where image filters like `grayscale`
+     * are applied during image generation, and unknown params are reflected,
+     * escaped, into the `src`); that path invokes no code, so it stays open.
+     *
+     * This list mirrors the actions documented at
+     * https://learn.getgrav.org/content/media.
+     *
+     * Matching is case-insensitive (see {@see isAllowedAction()}) because PHP
+     * method dispatch is, so each action is listed once in its documented
+     * casing. This list is intentionally not configurable; add newly documented
+     * actions here in core as needed.
+     *
+     * @var string[]
      */
-    protected $mode = 'source';
+    public const ALLOWED_ACTIONS = [
+        // Image manipulation (cf. ImageMediaTrait::$magic_actions). zoomCrop and
+        // its legacy alias cropZoom are both kept for backwards compatibility.
+        'resize', 'forceResize', 'cropResize', 'crop', 'zoomCrop', 'cropZoom',
+        'negate', 'brightness', 'contrast', 'grayscale', 'emboss', 'smooth',
+        'sharp', 'edge', 'colorize', 'sepia', 'enableProgressive', 'rotate',
+        'flip', 'fixOrientation', 'gaussianBlur', 'format', 'quality',
+        'watermark', 'derivatives', 'cache',
+        // Rendering, layout, and HTML attributes
+        'lightbox', 'link', 'classes', 'style', 'id', 'attribute',
+        'width', 'height', 'sizes', 'autoSizes', 'aspectRatio', 'retinaScale',
+        'loading', 'decoding', 'fetchpriority', 'display', 'thumbnail', 'reset',
+        // Audio / video players
+        'controls', 'controlsList', 'loop', 'autoplay', 'muted', 'preload',
+        'playsinline', 'poster',
+    ];
 
     /**
-     * @var Medium
+     * Fields that say which file a medium is and where it is served from. Core
+     * fills them in from the file on disk and `media.types` (MediumFactory,
+     * Media::init(), MediaRouteUrls), and everything that opens, streams or links
+     * the medium trusts them, so a `.meta.yaml` sidecar may describe the medium
+     * but never replace these.
+     *
+     * @var string[]
      */
-    protected $_thumbnail = null;
+    public const RESERVED_META_KEYS = [
+        'filepath', 'path', 'filename', 'basename', 'extension', 'url',
+        'type', 'mime', 'size', 'modified', 'thumb', 'thumbnails', 'media',
+    ];
+
+    /** @var array<string,true>|null Memoized lower-cased ALLOWED_ACTIONS lookup. */
+    private static $allowedActionLookup = null;
 
     /**
-     * @var array
+     * Whether a media action may be invoked from an editor-authored URL.
+     * Case-insensitive, matching PHP's method-name dispatch so that e.g.
+     * `?Resize=` cannot slip past the allowlist while still calling resize().
+     *
+     * @param string $method
+     * @return bool
      */
-    protected $thumbnailTypes = [ 'page', 'default' ];
+    public static function isAllowedAction(string $method): bool
+    {
+        if (self::$allowedActionLookup === null) {
+            self::$allowedActionLookup = array_fill_keys(
+                array_map('strtolower', self::ALLOWED_ACTIONS),
+                true
+            );
+        }
 
-    protected $thumbnailType = null;
-
-    /**
-     * @var Medium[]
-     */
-    protected $alternatives = [];
-
-    /**
-     * @var array
-     */
-    protected $attributes = [];
-
-    /**
-     * @var array
-     */
-    protected $styleAttributes = [];
+        return isset(self::$allowedActionLookup[strtolower($method)]);
+    }
 
     /**
      * Construct.
      *
      * @param array $items
-     * @param Blueprint $blueprint
+     * @param Blueprint|null $blueprint
      */
-    public function __construct($items = [], Blueprint $blueprint = null)
+    public function __construct($items = [], ?Blueprint $blueprint = null)
     {
         parent::__construct($items, $blueprint);
 
-        if (self::getGrav()['config']->get('system.media.enable_media_timestamp', true)) {
-            $this->querystring('&' . self::getGrav()['cache']->getKey());
+        if (Grav::instance()['config']->get('system.media.enable_media_timestamp', true)) {
+            $this->timestamp = Grav::instance()['cache']->getKey();
         }
 
         $this->def('mime', 'application/octet-stream');
+
+        if (!$this->offsetExists('size')) {
+            $path = $this->get('filepath');
+            $this->def('size', filesize($path));
+        }
+
         $this->reset();
     }
 
     /**
-     * Return just metadata from the Medium object
-     *
-     * @return $this
+     * Clone medium.
      */
-    public function meta()
+    #[\ReturnTypeWillChange]
+    public function __clone()
     {
-        return new Data($this->items);
+        // Alternatives get the querystring too, so a copy needs its own. A cached
+        // thumbnail still points at the original as its parent.
+        foreach ($this->alternatives as $width => $alternative) {
+            $this->alternatives[$width] = clone $alternative;
+        }
+        $this->_thumbnail = null;
     }
 
     /**
      * Add meta file for the medium.
      *
-     * @param $filepath
+     * @param string $filepath
      */
     public function addMetaFile($filepath)
     {
-        $this->merge(CompiledYamlFile::instance($filepath)->content());
+        // A sidecar describes the medium; it never changes which file the
+        // medium is or where it is served from.
+        $metadata = (array)CompiledYamlFile::instance($filepath)->content();
+        $this->metadata = array_diff_key($metadata, array_flip(self::RESERVED_META_KEYS));
+        $this->merge($this->metadata);
     }
 
     /**
-     * Add alternative Medium to this Medium.
-     *
-     * @param $ratio
-     * @param Medium $alternative
+     * @return array
      */
-    public function addAlternative($ratio, Medium $alternative)
+    public function getMeta(): array
     {
-        if (!is_numeric($ratio) || $ratio === 0) {
-            return;
-        }
-
-        $alternative->set('ratio', $ratio);
-        $this->alternatives[(float) $ratio] = $alternative;
+        return [
+            'mime' => $this->mime,
+            'size' => $this->size,
+            'modified' => $this->modified,
+        ];
     }
 
     /**
@@ -109,353 +183,43 @@ class Medium extends Data implements RenderableInterface
      *
      * @return string
      */
-    public function __toString()
+    #[\ReturnTypeWillChange]
+    public function __toString(): string
     {
         return $this->html();
     }
 
     /**
-     * Return PATH to file.
-     *
-     * @param bool $reset
-     * @return  string path to file
+     * @param string $thumb
+     * @return Medium|null
      */
-    public function path($reset = true)
+    protected function createThumbnail($thumb)
     {
-        if ($reset) {
-            $this->reset();
-        }
-
-        return $this->get('filepath');
+        return MediumFactory::fromFile($thumb, ['type' => 'thumbnail']);
     }
 
     /**
-     * Return URL to file.
-     *
-     * @param bool $reset
-     * @return string
+     * @param array $attributes
+     * @return MediaLinkInterface
      */
-    public function url($reset = true)
+    protected function createLink(array $attributes)
     {
-        $output = preg_replace('|^' . GRAV_ROOT . '|', '', $this->get('filepath'));
-
-        if ($reset) {
-            $this->reset();
-        }
-
-        return self::$grav['base_url'] . $output . $this->querystring() . $this->urlHash();
-    }
-
-    /**
-     * Get/set querystring for the file's url
-     *
-     * @param  string  $hash
-     * @param  boolean $withHash
-     * @return string
-     */
-    public function querystring($querystring = null, $withQuestionmark = true)
-    {
-        if ($querystring) {
-            $this->set('querystring', ltrim($querystring, '?&'));
-
-            foreach ($this->alternatives as $alt) {
-                $alt->querystring($querystring, $withQuestionmark);
-            }
-        }
-
-        $querystring = $this->get('querystring', '');
-
-        if ($withQuestionmark && !empty($querystring)) {
-            return '?' . $querystring;
-        } else {
-            return $querystring;
-        }
-    }
-
-    /**
-     * Get/set hash for the file's url
-     *
-     * @param  string  $hash
-     * @param  boolean $withHash
-     * @return string
-     */
-    public function urlHash($hash = null, $withHash = true)
-    {
-        if ($hash) {
-            $this->set('urlHash', ltrim($hash, '#'));
-        }
-
-        $hash = $this->get('urlHash', '');
-
-        if ($withHash && !empty($hash)) {
-            return '#' . $hash;
-        } else {
-            return $hash;
-        }
-    }
-
-    /**
-     * Get an element (is array) that can be rendered by the Parsedown engine
-     *
-     * @param  string  $title
-     * @param  string  $alt
-     * @param  string  $class
-     * @param  boolean $reset
-     * @return array
-     */
-    public function parsedownElement($title = null, $alt = null, $class = null, $reset = true)
-    {
-        $attributes = $this->attributes;
-
-        $style = '';
-        foreach ($this->styleAttributes as $key => $value) {
-            if (is_numeric($key)) // Special case for inline style attributes, refer to style() method
-                $style .= $value;
-            else
-                $style .= $key . ': ' . $value . ';';
-        }
-        if ($style)
-            $attributes['style'] = $style;
-
-        if (empty($attributes['title'])) {
-            if (!empty($title)) {
-                $attributes['title'] = $title;
-            } elseif (!empty($this->items['title'])) {
-                $attributes['title'] = $this->items['title'];
-            }
-        }
-
-        if (empty($attributes['alt'])) {
-            if (!empty($alt)) {
-                $attributes['alt'] = $alt;
-            } elseif (!empty($this->items['alt'])) {
-                $attributes['alt'] = $this->items['alt'];
-            }
-        }
-
-        if (empty($attributes['class'])) {
-            if (!empty($class)) {
-                $attributes['class'] = $class;
-            } elseif (!empty($this->items['class'])) {
-                $attributes['class'] = $this->items['class'];
-            }
-        }
-
-        switch ($this->mode) {
-            case 'text':
-                $element = $this->textParsedownElement($attributes, false);
-                break;
-            case 'thumbnail':
-                $element = $this->getThumbnail()->sourceParsedownElement($attributes, false);
-                break;
-            case 'source':
-                $element = $this->sourceParsedownElement($attributes, false);
-                break;
-        }
-
-        if ($reset) {
-            $this->reset();
-        }
-
-        $this->display('source');
-
-        return $element;
-    }
-
-    /**
-     * Parsedown element for source display mode
-     *
-     * @param  array $attributes
-     * @param  boolean $reset
-     * @return array
-     */
-    protected function sourceParsedownElement(array $attributes, $reset = true)
-    {
-        return $this->textParsedownElement($attributes, $reset);
-    }
-
-    /**
-     * Parsedown element for text display mode
-     *
-     * @param  array $attributes
-     * @param  boolean $reset
-     * @return array
-     */
-    protected function textParsedownElement(array $attributes, $reset = true)
-    {
-        $text = empty($attributes['title']) ? empty($attributes['alt']) ? $this->get('filename') : $attributes['alt'] : $attributes['title'];
-
-        $element = [
-            'name' => 'p',
-            'attributes' => $attributes,
-            'text' => $text
-        ];
-
-        if ($reset) {
-            $this->reset();
-        }
-
-        return $element;
-    }
-
-    /**
-     * Reset medium.
-     *
-     * @return $this
-     */
-    public function reset()
-    {
-        $this->attributes = [];
-        return $this;
-    }
-
-    /**
-     * Switch display mode.
-     *
-     * @param string $mode
-     *
-     * @return $this
-     */
-    public function display($mode = 'source')
-    {
-        if ($this->mode === $mode) {
-            return $this;
-        }
-
-
-        $this->mode = $mode;
-
-        return $mode === 'thumbnail' ? $this->getThumbnail()->reset() : $this->reset();
-    }
-
-    /**
-     * Switch thumbnail.
-     *
-     * @param string $type
-     *
-     * @return $this
-     */
-    public function thumbnail($type = 'auto')
-    {
-        if ($type !== 'auto' && !in_array($type, $this->thumbnailTypes)) {
-            return $this;
-        }
-
-        if ($this->thumbnailType !== $type) {
-            $this->_thumbnail = null;
-        }
-
-        $this->thumbnailType = $type;
-
-        return $this;
-    }
-
-    /**
-     * Turn the current Medium into a Link
-     *
-     * @param  boolean $reset
-     * @param  array  $attributes
-     * @return Link
-     */
-    public function link($reset = true, array $attributes = [])
-    {
-        if ($this->mode !== 'source') {
-            $this->display('source');
-        }
-
-        foreach ($this->attributes as $key => $value) {
-            empty($attributes['data-' . $key]) && $attributes['data-' . $key] = $value;
-        }
-
-        empty($attributes['href']) && $attributes['href'] = $this->url();
-
         return new Link($attributes, $this);
     }
 
     /**
-     * Turn the current Medium into a Link with lightbox enabled
-     *
-     * @param  int  $width
-     * @param  int  $height
-     * @param  boolean $reset
-     * @return Link
+     * @return Grav
      */
-    public function lightbox($width = null, $height = null, $reset = true)
+    protected function getGrav(): Grav
     {
-        $attributes = ['rel' => 'lightbox'];
-
-        if ($width && $height) {
-            $attributes['data-width'] = $width;
-            $attributes['data-height'] = $height;
-        }
-
-        return $this->link($reset, $attributes);
+        return Grav::instance();
     }
 
     /**
-     * Allows to add an inline style attribute from Markdown or Twig
-     * Example: ![Example](myimg.png?style=float:left)
-     *
-     * @param string $style
-     * @return $this
+     * @return array
      */
-    public function style($style)
+    protected function getItems(): array
     {
-        $this->styleAttributes[] = rtrim($style, ';') . ';';
-        return $this;
+        return $this->items;
     }
-
-    /**
-     * Allow any action to be called on this medium from twig or markdown
-     *
-     * @param string $method
-     * @param mixed $args
-     * @return $this
-     */
-    public function __call($method, $args)
-    {
-        $qs = $method;
-        if (count($args) > 1 || (count($args) == 1 && !empty($args[0]))) {
-            $qs .= '=' . implode(',', array_map(function ($a) { return urlencode($a); }, $args));
-        }
-
-        if (!empty($qs)) {
-            $this->querystring($this->querystring(null, false) . '&' . $qs);
-        }
-
-        return $this;
-    }
-
-    /**
-     * Get the thumbnail Medium object
-     *
-     * @return ThumbnailImageMedium
-     */
-    protected function getThumbnail()
-    {
-        if (!$this->_thumbnail) {
-            $types = $this->thumbnailTypes;
-
-            if ($this->thumbnailType !== 'auto') {
-                array_unshift($types, $this->thumbnailType);
-            }
-
-            foreach ($types as $type) {
-                $thumb = $this->get('thumbnails.' . $type, false);
-
-                if ($thumb) {
-                    $thumb = $thumb instanceof ThumbnailImageMedium ? $thumb : MediumFactory::fromFile($thumb, ['type' => 'thumbnail']);
-                    $thumb->parent = $this;
-                }
-
-                if ($thumb) {
-                    $this->_thumbnail = $thumb;
-                    break;
-                }
-            }
-        }
-
-        return $this->_thumbnail;
-    }
-
 }

@@ -1,13 +1,20 @@
 <?php
+
+/**
+ * @package    Grav\Common\Data
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common\Data;
 
+use Exception;
 use RocketTheme\Toolbox\File\FileInterface;
 
 /**
- * Data interface
- *
- * @author RocketTheme
- * @license MIT
+ * Interface DataInterface
+ * @package Grav\Common\Data
  */
 interface DataInterface
 {
@@ -21,7 +28,7 @@ interface DataInterface
      * @param string  $separator  Separator, defaults to '.'
      * @return mixed  Value.
      */
-    public function value($name, $default = null, $separator = '.');
+    public function value($name, mixed $default = null, $separator = '.');
 
     /**
      * Merge external data.
@@ -33,36 +40,45 @@ interface DataInterface
 
     /**
      * Return blueprints.
+     *
+     * @return Blueprint
      */
     public function blueprints();
 
     /**
      * Validate by blueprints.
      *
-     * @throws \Exception
+     * @return $this
+     * @throws Exception
      */
     public function validate();
 
     /**
      * Filter all items by using blueprints.
+     *
+     * @return $this
      */
     public function filter();
 
     /**
      * Get extra items which haven't been defined in blueprints.
+     *
+     * @return array
      */
     public function extra();
 
     /**
      * Save data into the file.
+     *
+     * @return void
      */
     public function save();
 
     /**
      * Set or get the data storage.
      *
-     * @param FileInterface $storage Optionally enter a new storage.
+     * @param FileInterface|null $storage Optionally enter a new storage.
      * @return FileInterface
      */
-    public function file(FileInterface $storage = null);
+    public function file(?FileInterface $storage = null);
 }

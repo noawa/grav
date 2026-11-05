@@ -1,47 +1,30 @@
 <?php
+
+/**
+ * @package    Grav\Console\Cli
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Console\Cli;
 
-use Grav\Console\ConsoleTrait;
-use Symfony\Component\Console\Command\Command;
-use Symfony\Component\Console\Formatter\OutputFormatterStyle;
-use Symfony\Component\Console\Input\InputArgument;
-use Symfony\Component\Console\Input\InputInterface;
+use Grav\Console\GravCommand;
 use Symfony\Component\Console\Input\InputOption;
-use Symfony\Component\Console\Output\OutputInterface;
-use Symfony\Component\Yaml\Yaml;
 
 /**
  * Class ComposerCommand
  * @package Grav\Console\Cli
  */
-class ComposerCommand extends Command
+class ComposerCommand extends GravCommand
 {
-    use ConsoleTrait;
-
     /**
-     * @var
+     * @return void
      */
-    protected $config;
-    /**
-     * @var
-     */
-    protected $local_config;
-    /**
-     * @var
-     */
-    protected $destination;
-    /**
-     * @var
-     */
-    protected $user_path;
-
-    /**
-     *
-     */
-    protected function configure()
+    protected function configure(): void
     {
         $this
-            ->setName("composer")
+            ->setName('composer')
             ->addOption(
                 'install',
                 'i',
@@ -54,19 +37,17 @@ class ComposerCommand extends Command
                 InputOption::VALUE_NONE,
                 'update the dependencies'
             )
-            ->setDescription("Updates the composer vendor dependencies needed by Grav.")
+            ->setDescription('Updates the composer vendor dependencies needed by Grav.')
             ->setHelp('The <info>composer</info> command updates the composer vendor dependencies needed by Grav');
     }
 
     /**
-     * @param InputInterface  $input
-     * @param OutputInterface $output
-     *
-     * @return int|null|void
+     * @return int
      */
-    protected function execute(InputInterface $input, OutputInterface $output)
+    protected function serve(): int
     {
-        $this->setupConsole($input, $output);
+        $input = $this->getInput();
+        $io = $this->getIO();
 
         $action = $input->getOption('install') ? 'install' : ($input->getOption('update') ? 'update' : 'install');
 
@@ -75,8 +56,9 @@ class ComposerCommand extends Command
         }
 
         // Updates composer first
-        $output->writeln("\nInstalling vendor dependencies");
-        $output->writeln($this->composerUpdate(GRAV_ROOT, $action));
-    }
+        $io->writeln("\nInstalling vendor dependencies");
+        $io->writeln($this->composerUpdate(GRAV_ROOT, $action));
 
+        return 0;
+    }
 }

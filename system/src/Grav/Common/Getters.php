@@ -1,29 +1,35 @@
 <?php
-namespace Grav\Common;
 
 /**
- * Abstract class to implement magic __get(), __set(), __isset() and __unset().
- * Also implements ArrayAccess.
+ * @package    Grav\Common
  *
- * @author RocketTheme
- * @license MIT
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
  */
-abstract class Getters implements \ArrayAccess, \Countable
+
+namespace Grav\Common;
+
+use ArrayAccess;
+use Countable;
+use function count;
+
+/**
+ * Class Getters
+ * @package Grav\Common
+ */
+abstract class Getters implements ArrayAccess, Countable
 {
-    /**
-     * Define variable used in getters.
-     *
-     * @var string
-     */
+    /** @var string Define variable used in getters. */
     protected $gettersVariable = null;
 
     /**
      * Magic setter method
      *
-     * @param mixed $offset Medium name value
+     * @param int|string $offset Medium name value
      * @param mixed $value  Medium value
      */
-    public function __set($offset, $value)
+    #[\ReturnTypeWillChange]
+    public function __set($offset, mixed $value)
     {
         $this->offsetSet($offset, $value);
     }
@@ -31,9 +37,10 @@ abstract class Getters implements \ArrayAccess, \Countable
     /**
      * Magic getter method
      *
-     * @param  mixed $offset Medium name value
+     * @param  int|string $offset Medium name value
      * @return mixed         Medium value
      */
+    #[\ReturnTypeWillChange]
     public function __get($offset)
     {
         return $this->offsetGet($offset);
@@ -42,9 +49,10 @@ abstract class Getters implements \ArrayAccess, \Countable
     /**
      * Magic method to determine if the attribute is set
      *
-     * @param  mixed   $offset Medium name value
+     * @param  int|string $offset Medium name value
      * @return boolean         True if the value is set
      */
+    #[\ReturnTypeWillChange]
     public function __isset($offset)
     {
         return $this->offsetExists($offset);
@@ -53,46 +61,51 @@ abstract class Getters implements \ArrayAccess, \Countable
     /**
      * Magic method to unset the attribute
      *
-     * @param mixed $offset The name value to unset
+     * @param int|string $offset The name value to unset
      */
+    #[\ReturnTypeWillChange]
     public function __unset($offset)
     {
         $this->offsetUnset($offset);
     }
 
     /**
-     * @param mixed $offset
+     * @param int|string $offset
      * @return bool
      */
+    #[\ReturnTypeWillChange]
     public function offsetExists($offset)
     {
         if ($this->gettersVariable) {
             $var = $this->gettersVariable;
+
             return isset($this->{$var}[$offset]);
-        } else {
-            return isset($this->{$offset});
         }
+
+        return isset($this->{$offset});
     }
 
     /**
-     * @param mixed $offset
+     * @param int|string $offset
      * @return mixed
      */
+    #[\ReturnTypeWillChange]
     public function offsetGet($offset)
     {
         if ($this->gettersVariable) {
             $var = $this->gettersVariable;
-            return isset($this->{$var}[$offset]) ? $this->{$var}[$offset] : null;
-        } else {
-            return isset($this->{$offset}) ? $this->{$offset} : null;
+
+            return $this->{$var}[$offset] ?? null;
         }
+
+        return $this->{$offset} ?? null;
     }
 
     /**
-     * @param mixed $offset
-     * @param mixed $value
+     * @param int|string $offset
      */
-    public function offsetSet($offset, $value)
+    #[\ReturnTypeWillChange]
+    public function offsetSet($offset, mixed $value)
     {
         if ($this->gettersVariable) {
             $var = $this->gettersVariable;
@@ -103,8 +116,9 @@ abstract class Getters implements \ArrayAccess, \Countable
     }
 
     /**
-     * @param mixed $offset
+     * @param int|string $offset
      */
+    #[\ReturnTypeWillChange]
     public function offsetUnset($offset)
     {
         if ($this->gettersVariable) {
@@ -118,14 +132,15 @@ abstract class Getters implements \ArrayAccess, \Countable
     /**
      * @return int
      */
+    #[\ReturnTypeWillChange]
     public function count()
     {
         if ($this->gettersVariable) {
             $var = $this->gettersVariable;
-            count($this->{$var});
-        } else {
-            count($this->toArray());
+            return count($this->{$var});
         }
+
+        return count($this->toArray());
     }
 
     /**
@@ -137,14 +152,18 @@ abstract class Getters implements \ArrayAccess, \Countable
     {
         if ($this->gettersVariable) {
             $var = $this->gettersVariable;
+
             return $this->{$var};
-        } else {
-            $properties = (array) $this;
-            $list = array();
-            foreach ($properties as $property => $value) {
-                if ($property[0] != "\0") $list[$property] = $value;
-            }
-            return $list;
         }
+
+        $properties = (array)$this;
+        $list = [];
+        foreach ($properties as $property => $value) {
+            if ($property[0] !== "\0") {
+                $list[$property] = $value;
+            }
+        }
+
+        return $list;
     }
 }

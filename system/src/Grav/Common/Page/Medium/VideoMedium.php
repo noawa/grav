@@ -1,34 +1,24 @@
 <?php
+
+/**
+ * @package    Grav\Common\Page
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common\Page\Medium;
 
-use Grav\Common\Config\Config;
-use Grav\Common\File\CompiledYamlFile;
-use Grav\Common\Grav;
-use Grav\Common\GravTrait;
-use Grav\Common\Data\Blueprint;
-use Grav\Common\Data\Data;
+use Grav\Common\Media\Interfaces\VideoMediaInterface;
+use Grav\Common\Media\Traits\VideoMediaTrait;
 
-class VideoMedium extends Medium
+/**
+ * Class VideoMedium
+ * @package Grav\Common\Page\Medium
+ */
+class VideoMedium extends Medium implements VideoMediaInterface
 {
-    use StaticResizeTrait;
-
-    /**
-     * Parsedown element for source display mode
-     *
-     * @param  array $attributes
-     * @param  boolean $reset
-     * @return array
-     */
-    protected function sourceParsedownElement(array $attributes, $reset = true)
-    {
-        $location = $this->url($reset);
-
-        return [
-            'name' => 'video',
-            'text' => '<source src="' . $location . '">Your browser does not support the video tag.',
-            'attributes' => $attributes
-        ];
-    }
+    use VideoMediaTrait;
 
     /**
      * Reset medium.
@@ -39,7 +29,8 @@ class VideoMedium extends Medium
     {
         parent::reset();
 
-        $this->attributes['controls'] = true;
+        $this->resetPlayer();
+
         return $this;
     }
 }

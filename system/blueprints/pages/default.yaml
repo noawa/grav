@@ -2,9 +2,9 @@ title: PLUGIN_ADMIN.DEFAULT
 
 rules:
   slug:
-    pattern: "[a-z][a-z0-9_\-]+"
-    min: 2
-    max: 80
+    pattern: '[a-zA-Zа-яA-Я0-9_\-]+'
+    min: 1
+    max: 200
 
 form:
   validation: loose
@@ -21,6 +21,9 @@ form:
           title: PLUGIN_ADMIN.CONTENT
 
           fields:
+            xss_check:
+              type: xss
+
             header.title:
               type: text
               autofocus: true
@@ -29,11 +32,13 @@ form:
 
             content:
                 type: markdown
-                label: PLUGIN_ADMIN.CONTENT
                 validate:
                   type: textarea
+                  # Page body has no length ceiling: `0` opts out of the default
+                  # multiline guard, which used to reject long pages (#3643).
+                  max: 0
 
-            uploads:
+            header.media_order:
               type: pagemedia
               label: PLUGIN_ADMIN.PAGE_MEDIA
 
@@ -45,7 +50,7 @@ form:
 
             publishing:
               type: section
-              title: Publishing
+              title: PLUGIN_ADMIN.PUBLISHING
               underline: true
 
               fields:
@@ -88,7 +93,6 @@ form:
                   placeholder_key: PLUGIN_ADMIN.METADATA_KEY
                   placeholder_value: PLUGIN_ADMIN.METADATA_VALUE
 
-
             taxonomies:
               type: section
               title: PLUGIN_ADMIN.TAXONOMIES
@@ -119,31 +123,16 @@ form:
                       title: PLUGIN_ADMIN.SETTINGS
                       underline: true
 
-                    ordering:
-                      type: toggle
-                      label: PLUGIN_ADMIN.FOLDER_NUMERIC_PREFIX
-                      help: PLUGIN_ADMIN.FOLDER_NUMERIC_PREFIX_HELP
-                      highlight: 1
-                      options:
-                        1: PLUGIN_ADMIN.ENABLED
-                        0: PLUGIN_ADMIN.DISABLED
-                      validate:
-                        type: bool
-
                     folder:
-                      type: text
+                      type: folder-slug
                       label: PLUGIN_ADMIN.FOLDER_NAME
                       validate:
-                        type: slug
+                        rule: slug
 
                     route:
-                      type: select
+                      type: parents
                       label: PLUGIN_ADMIN.PARENT
                       classes: fancy
-                      '@data-options': '\Grav\Common\Page\Pages::parents'
-                      '@data-default': '\Grav\Plugin\admin::route'
-                      options:
-                        '/': PLUGIN_ADMIN.DEFAULT_OPTION_ROOT
 
                     name:
                       type: select
@@ -151,7 +140,7 @@ form:
                       label: PLUGIN_ADMIN.PAGE_FILE
                       help: PLUGIN_ADMIN.PAGE_FILE_HELP
                       default: default
-                      '@data-options': '\Grav\Common\Page\Pages::pageTypes'
+                      data-options@: '\Grav\Common\Page\Pages::pageTypes'
 
                     header.body_classes:
                       type: text
@@ -167,9 +156,20 @@ form:
                       title: PLUGIN_ADMIN.ORDERING
                       underline: true
 
+                    ordering:
+                      type: toggle
+                      label: PLUGIN_ADMIN.FOLDER_NUMERIC_PREFIX
+                      help: PLUGIN_ADMIN.FOLDER_NUMERIC_PREFIX_HELP
+                      highlight: 1
+                      options:
+                        1: PLUGIN_ADMIN.ENABLED
+                        0: PLUGIN_ADMIN.DISABLED
+                      validate:
+                        type: bool
+
                     order:
                       type: order
-                      label: PLUGIN_ADMIN.PAGE_ORDER
+                      label: PLUGIN_ADMIN.SORTABLE_PAGES
                       sitemap:
 
             overrides:
@@ -178,6 +178,19 @@ form:
               underline: true
 
               fields:
+
+                header.dateformat:
+                  toggleable: true
+                  type: select
+                  size: medium
+                  selectize:
+                    create: true
+                  label: PLUGIN_ADMIN.DEFAULT_DATE_FORMAT
+                  help: PLUGIN_ADMIN.DEFAULT_DATE_FORMAT_HELP
+                  placeholder: PLUGIN_ADMIN.DEFAULT_DATE_FORMAT_PLACEHOLDER
+                  data-options@: '\Grav\Common\Utils::dateFormats'
+                  validate:
+                    type: string
 
                 header.menu:
                   type: text
@@ -200,18 +213,49 @@ form:
                   toggleable: true
                   help: PLUGIN_ADMIN.REDIRECT_HELP
 
+                header.external_url:
+                  type: text
+                  label: PLUGIN_ADMIN.EXTERNAL_URL
+                  toggleable: true
+                  help: PLUGIN_ADMIN.EXTERNAL_URL_HELP
+                  placeholder: https://getgrav.org
+
                 header.process:
                   type: checkboxes
                   label: PLUGIN_ADMIN.PROCESS
                   toggleable: true
-                  '@config-default': system.pages.process
-                  default:
-                    markdown: true
-                    twig: false
-                  options:
-                    markdown: Markdown
-                    twig: Twig
+                  # Do NOT add an inline `default:` block here. Blueprint::dynamicData
+                  # merges the callback result via PHP `+=` (left wins), so a static
+                  # `default: { twig: false }` would silently override the gate-derived
+                  # twig default from pageProcessDefaults() and re-introduce the
+                  # admin-UI / runtime mismatch this helper exists to prevent.
+                  data-default@: '\Grav\Common\Security::pageProcessDefaults'
+                  data-options@: '\Grav\Common\Security::pageProcessOptions'
                   use: keys
+
+                header.twig_first:
+                  type: toggle
+                  toggleable: true
+                  label: PLUGIN_ADMIN.TWIG_FIRST
+                  help: PLUGIN_ADMIN.TWIG_FIRST_HELP
+                  highlight: 0
+                  options:
+                    1: PLUGIN_ADMIN.YES
+                    0: PLUGIN_ADMIN.NO
+                  validate:
+                    type: bool
+
+                header.never_cache_twig:
+                  type: toggle
+                  toggleable: true
+                  label: PLUGIN_ADMIN.NEVER_CACHE_TWIG
+                  help: PLUGIN_ADMIN.NEVER_CACHE_TWIG_HELP
+                  highlight: 0
+                  options:
+                    1: PLUGIN_ADMIN.YES
+                    0: PLUGIN_ADMIN.NO
+                  validate:
+                    type: bool
 
                 header.child_type:
                   type: select
@@ -219,7 +263,7 @@ form:
                   label: PLUGIN_ADMIN.DEFAULT_CHILD_TYPE
                   default: default
                   placeholder: PLUGIN_ADMIN.USE_GLOBAL
-                  '@data-options': '\Grav\Common\Page\Pages::types'
+                  data-options@: '\Grav\Common\Page\Pages::types'
 
                 header.routable:
                   type: toggle
@@ -256,13 +300,83 @@ form:
                   validate:
                     type: bool
 
+                header.debugger:
+                  type: toggle
+                  toggleable: true
+                  label: PLUGIN_ADMIN.DEBUGGER
+                  help: PLUGIN_ADMIN.DEBUGGER_HELP
+                  highlight: 1
+                  options:
+                    1: PLUGIN_ADMIN.ENABLED
+                    0: PLUGIN_ADMIN.DISABLED
+                  validate:
+                    type: bool
+
                 header.template:
+                  type: text
+                  toggleable: true
+                  label: PLUGIN_ADMIN.DISPLAY_TEMPLATE
+
+                header.append_url_extension:
+                  type: text
+                  label: PLUGIN_ADMIN.APPEND_URL_EXT
+                  toggleable: true
+                  help: PLUGIN_ADMIN.APPEND_URL_EXT_HELP
+
+            routes_only:
+              type: section
+              title: PLUGIN_ADMIN.ROUTE_OVERRIDES
+              underline: true
+
+              fields:
+
+                header.redirect_default_route:
+                  type: toggle
+                  toggleable: true
+                  label: PLUGIN_ADMIN.REDIRECT_DEFAULT_ROUTE
+                  help: PLUGIN_ADMIN.REDIRECT_DEFAULT_ROUTE_HELP
+                  config-highlight@: system.pages.redirect_default_route
+                  options:
+                    1: PLUGIN_ADMIN.YES
+                    0: PLUGIN_ADMIN.NO
+                  validate:
+                    type: bool
+
+                header.routes.default:
+                  type: text
+                  toggleable: true
+                  label: PLUGIN_ADMIN.ROUTE_DEFAULT
+
+                header.routes.canonical:
+                  type: text
+                  toggleable: true
+                  label: PLUGIN_ADMIN.ROUTE_CANONICAL
+
+                header.routes.aliases:
+                  type: array
+                  toggleable: true
+                  value_only: true
+                  size: large
+                  label: PLUGIN_ADMIN.ROUTE_ALIASES
+
+
+            admin_only:
+              type: section
+              title: PLUGIN_ADMIN.ADMIN_SPECIFIC_OVERRIDES
+              underline: true
+
+              fields:
+
+                header.admin.children_display_order:
                   type: select
+                  label: PLUGIN_ADMIN.ADMIN_CHILDREN_DISPLAY_ORDER
+                  help: PLUGIN_ADMIN.ADMIN_CHILDREN_DISPLAY_ORDER_HELP
                   toggleable: true
                   classes: fancy
-                  label: PLUGIN_ADMIN.DISPLAY_TEMPLATE
-                  default: default
-                  '@data-options': '\Grav\Common\Page\Pages::types'
+                  default: 'collection'
+                  options:
+                    'collection': 'Ordered by Collection definition'
+                    'default': 'Ordered by Folder name'
 
                 header.order_by:
                   type: hidden

@@ -1,53 +1,56 @@
 <?php
+
+/**
+ * @package    Grav\Console\Gpm
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Console\Gpm;
 
-use Grav\Common\Filesystem\Folder;
 use Grav\Common\GPM\GPM;
 use Grav\Common\GPM\Installer;
-use Grav\Console\ConsoleTrait;
-use Symfony\Component\Console\Command\Command;
+use Grav\Common\GPM\Local;
+use Grav\Common\GPM\Remote;
+use Grav\Common\Grav;
+use Grav\Console\GpmCommand;
 use Symfony\Component\Console\Input\InputArgument;
-use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
-use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Question\ConfirmationQuestion;
+use Throwable;
+use function count;
+use function in_array;
+use function is_array;
 
 /**
  * Class UninstallCommand
  * @package Grav\Console\Gpm
  */
-class UninstallCommand extends Command
+class UninstallCommand extends GpmCommand
 {
-    use ConsoleTrait;
-
-    /**
-     * @var
-     */
+    /** @var array */
     protected $data;
-    /**
-     * @var
-     */
+    /** @var GPM */
     protected $gpm;
-    /**
-     * @var
-     */
+    /** @var string */
     protected $destination;
-    /**
-     * @var
-     */
+    /** @var string */
     protected $file;
-    /**
-     * @var
-     */
+    /** @var string */
     protected $tmp;
+    /** @var array */
+    protected $dependencies = [];
+    /** @var string */
+    protected $all_yes;
 
     /**
-     *
+     * @return void
      */
-    protected function configure()
+    protected function configure(): void
     {
         $this
-            ->setName("uninstall")
+            ->setName('uninstall')
             ->addOption(
                 'all-yes',
                 'y',
@@ -59,148 +62,258 @@ class UninstallCommand extends Command
                 InputArgument::IS_ARRAY | InputArgument::REQUIRED,
                 'The package(s) that are desired to be removed. Use the "index" command for a list of packages'
             )
-            ->setDescription("Performs the uninstallation of plugins and themes")
+            ->setDescription('Performs the uninstallation of plugins and themes')
             ->setHelp('The <info>uninstall</info> command allows to uninstall plugins and themes');
     }
 
     /**
-     * @param InputInterface  $input
-     * @param OutputInterface $output
-     *
-     * @return int|null|void
+     * @return int
      */
-    protected function execute(InputInterface $input, OutputInterface $output)
+    protected function serve(): int
     {
-        $this->setupConsole($input, $output);
+        $input = $this->getInput();
+        $io = $this->getIO();
 
         $this->gpm = new GPM();
 
-        $packages = array_map('strtolower', $this->input->getArgument('package'));
+        $this->all_yes = $input->getOption('all-yes');
+
+        $packages = array_map('strtolower', $input->getArgument('package'));
         $this->data = ['total' => 0, 'not_found' => []];
 
+        $total = 0;
         foreach ($packages as $package) {
             $plugin = $this->gpm->getInstalledPlugin($package);
             $theme = $this->gpm->getInstalledTheme($package);
             if ($plugin || $theme) {
                 $this->data[strtolower($package)] = $plugin ?: $theme;
-                $this->data['total']++;
+                $total++;
             } else {
                 $this->data['not_found'][] = $package;
             }
         }
+        $this->data['total'] = $total;
 
-        $this->output->writeln('');
+        $io->newLine();
 
         if (!$this->data['total']) {
-            $this->output->writeln("Nothing to uninstall.");
-            $this->output->writeln('');
-            exit;
+            $io->writeln('Nothing to uninstall.');
+            $io->newLine();
+
+            return 0;
         }
 
         if (count($this->data['not_found'])) {
-            $this->output->writeln("These packages were not found installed: <red>" . implode('</red>, <red>',
-                    $this->data['not_found']) . "</red>");
+            $io->writeln('These packages were not found installed: <red>' . implode(
+                '</red>, <red>',
+                $this->data['not_found']
+            ) . '</red>');
         }
 
-        unset($this->data['not_found']);
-        unset($this->data['total']);
+        unset($this->data['not_found'], $this->data['total']);
 
+        // Plugins need to be initialized in order to make clearcache to work.
+        try {
+            $this->initializePlugins();
+        } catch (Throwable $e) {
+            $io->writeln("<red>Some plugins failed to initialize: {$e->getMessage()}</red>");
+        }
+
+        $error = 0;
         foreach ($this->data as $slug => $package) {
-            $this->output->writeln("Preparing to uninstall <cyan>" . $package->name . "</cyan> [v" . $package->version . "]");
+            $io->writeln("Preparing to uninstall <cyan>{$package->name}</cyan> [v{$package->version}]");
 
-
-            $this->output->write("  |- Checking destination...  ");
+            $io->write('  |- Checking destination...  ');
             $checks = $this->checkDestination($slug, $package);
 
             if (!$checks) {
-                $this->output->writeln("  '- <red>Installation failed or aborted.</red>");
-                $this->output->writeln('');
+                $io->writeln("  '- <red>Installation failed or aborted.</red>");
+                $io->newLine();
+                $error = 1;
             } else {
-                $this->output->write("  |- Uninstalling package...  ");
                 $uninstall = $this->uninstallPackage($slug, $package);
 
                 if (!$uninstall) {
-                    $this->output->writeln("  '- <red>Uninstallation failed or aborted.</red>");
-                    $this->output->writeln('');
+                    $io->writeln("  '- <red>Uninstallation failed or aborted.</red>");
+                    $error = 1;
                 } else {
-                    $this->output->writeln("  '- <green>Success!</green>  ");
-                    $this->output->writeln('');
+                    $io->writeln("  '- <green>Success!</green>  ");
                 }
             }
         }
 
         // clear cache after successful upgrade
         $this->clearCache();
+
+        return $error;
     }
 
-
     /**
-     * @param $slug
-     * @param $package
-     *
+     * @param string $slug
+     * @param Local\Package|Remote\Package $package
+     * @param bool $is_dependency
      * @return bool
      */
-    private function uninstallPackage($slug, $package)
+    private function uninstallPackage($slug, $package, $is_dependency = false): bool
     {
-        $path = self::getGrav()['locator']->findResource($package->package_type . '://' .$slug);
+        $io = $this->getIO();
+
+        if (!$slug) {
+            return false;
+        }
+
+        //check if there are packages that have this as a dependency. Abort and show list
+        $dependent_packages = $this->gpm->getPackagesThatDependOnPackage($slug);
+        if (count($dependent_packages) > ($is_dependency ? 1 : 0)) {
+            $io->newLine(2);
+            $io->writeln('<red>Uninstallation failed.</red>');
+            $io->newLine();
+            if (count($dependent_packages) > ($is_dependency ? 2 : 1)) {
+                $io->writeln('The installed packages <cyan>' . implode('</cyan>, <cyan>', $dependent_packages) . '</cyan> depends on this package. Please remove those first.');
+            } else {
+                $io->writeln('The installed package <cyan>' . implode('</cyan>, <cyan>', $dependent_packages) . '</cyan> depends on this package. Please remove it first.');
+            }
+
+            $io->newLine();
+            return false;
+        }
+
+        if (isset($package->dependencies)) {
+            $dependencies = $package->dependencies;
+
+            if ($is_dependency) {
+                foreach ($dependencies as $key => $dependency) {
+                    if (in_array($dependency['name'], $this->dependencies, true)) {
+                        unset($dependencies[$key]);
+                    }
+                }
+            } elseif (count($dependencies) > 0) {
+                $io->writeln('  `- Dependencies found...');
+                $io->newLine();
+            }
+
+            foreach ($dependencies as $dependency) {
+                $this->dependencies[] = $dependency['name'];
+
+                if (is_array($dependency)) {
+                    $dependency = $dependency['name'];
+                }
+                if ($dependency === 'grav' || $dependency === 'php') {
+                    continue;
+                }
+
+                $dependencyPackage = $this->gpm->findPackage($dependency);
+
+                // Same false-not-null return as the install path: a dependency
+                // missing from the index would otherwise reach packageExists()
+                // and have its `package_type` read off a bool.
+                if (!$dependencyPackage) {
+                    continue;
+                }
+
+                $dependency_exists = $this->packageExists($dependency, $dependencyPackage);
+
+                if ($dependency_exists == Installer::EXISTS) {
+                    $io->writeln("A dependency on <cyan>{$dependencyPackage->name}</cyan> [v{$dependencyPackage->version}] was found");
+
+                    $question = new ConfirmationQuestion("  |- Uninstall <cyan>{$dependencyPackage->name}</cyan>? [y|N] ", false);
+                    $answer = $this->all_yes ? true : $io->askQuestion($question);
+
+                    if ($answer) {
+                        $uninstall = $this->uninstallPackage($dependency, $dependencyPackage, true);
+
+                        if (!$uninstall) {
+                            $io->writeln("  '- <red>Uninstallation failed or aborted.</red>");
+                        } else {
+                            $io->writeln("  '- <green>Success!</green>  ");
+                        }
+                        $io->newLine();
+                    } else {
+                        $io->writeln("  '- <yellow>You decided not to uninstall {$dependencyPackage->name}.</yellow>");
+                        $io->newLine();
+                    }
+                }
+            }
+        }
+
+
+        $locator = Grav::instance()['locator'];
+        $path = $locator->findResource($package->package_type . '://' . $slug);
         Installer::uninstall($path);
         $errorCode = Installer::lastErrorCode();
 
         if ($errorCode && $errorCode !== Installer::IS_LINK && $errorCode !== Installer::EXISTS) {
-            $this->output->write("\x0D");
-            // extra white spaces to clear out the buffer properly
-            $this->output->writeln("  |- Uninstalling package...  <red>error</red>                             ");
-            $this->output->writeln("  |  '- " . Installer::lastErrorMsg());
+            $io->writeln("  |- Uninstalling {$package->name} package...  <red>error</red>                             ");
+            $io->writeln("  |  '- <yellow>" . Installer::lastErrorMsg() . '</yellow>');
 
             return false;
         }
 
-        $this->output->write("\x0D");
-        // extra white spaces to clear out the buffer properly
-        $this->output->writeln("  |- Uninstalling package...  <green>ok</green>                             ");
+        $message = Installer::getMessage();
+        if ($message) {
+            $io->writeln("  |- {$message}");
+        }
+
+        if (!$is_dependency && $this->dependencies) {
+            $io->writeln("Finishing up uninstalling <cyan>{$package->name}</cyan>");
+        }
+        $io->writeln("  |- Uninstalling {$package->name} package...  <green>ok</green>                             ");
 
         return true;
     }
 
     /**
-     * @param $slug
-     * @param $package
-     *
+     * @param string $slug
+     * @param Local\Package|Remote\Package $package
      * @return bool
      */
-
-    private function checkDestination($slug, $package)
+    private function checkDestination(string $slug, $package): bool
     {
-        $path = self::getGrav()['locator']->findResource($package->package_type . '://' . $slug);
-        $questionHelper = $this->getHelper('question');
-        $skipPrompt = $this->input->getOption('all-yes');
+        $io = $this->getIO();
 
-        Installer::isValidDestination($path);
+        $exists = $this->packageExists($slug, $package);
 
-        if (Installer::lastErrorCode() == Installer::IS_LINK) {
-            $this->output->write("\x0D");
-            $this->output->writeln("  |- Checking destination...  <yellow>symbolic link</yellow>");
+        if ($exists === Installer::IS_LINK) {
+            $io->write("\x0D");
+            $io->writeln('  |- Checking destination...  <yellow>symbolic link</yellow>');
 
-            if ($skipPrompt) {
-                $this->output->writeln("  |     '- <yellow>Skipped automatically.</yellow>");
+            if ($this->all_yes) {
+                $io->writeln("  |     '- <yellow>Skipped automatically.</yellow>");
 
                 return false;
             }
 
-            $question = new ConfirmationQuestion("  |  '- Destination has been detected as symlink, delete symbolic link first? [y|N] ",
-                false);
-            $answer = $questionHelper->ask($this->input, $this->output, $question);
+            $question = new ConfirmationQuestion(
+                "  |  '- Destination has been detected as symlink, delete symbolic link first? [y|N] ",
+                false
+            );
 
+            $answer = $io->askQuestion($question);
             if (!$answer) {
-                $this->output->writeln("  |     '- <red>You decided to not delete the symlink automatically.</red>");
+                $io->writeln("  |     '- <red>You decided not to delete the symlink automatically.</red>");
 
                 return false;
             }
         }
 
-        $this->output->write("\x0D");
-        $this->output->writeln("  |- Checking destination...  <green>ok</green>");
+        $io->write("\x0D");
+        $io->writeln('  |- Checking destination...  <green>ok</green>');
 
         return true;
+    }
+
+    /**
+     * Check if package exists
+     *
+     * @param string $slug
+     * @param Local\Package|Remote\Package $package
+     * @return int
+     */
+    private function packageExists(string $slug, $package): int
+    {
+        $path = Grav::instance()['locator']->findResource($package->package_type . '://' . $slug);
+        Installer::isValidDestination($path);
+
+        return Installer::lastErrorCode();
     }
 }

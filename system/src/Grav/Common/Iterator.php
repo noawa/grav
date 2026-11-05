@@ -1,4 +1,12 @@
 <?php
+
+/**
+ * @package    Grav\Common
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common;
 
 use RocketTheme\Toolbox\ArrayTraits\ArrayAccessWithGetters;
@@ -7,40 +15,43 @@ use RocketTheme\Toolbox\ArrayTraits\Constructor;
 use RocketTheme\Toolbox\ArrayTraits\Countable;
 use RocketTheme\Toolbox\ArrayTraits\Export;
 use RocketTheme\Toolbox\ArrayTraits\Serializable;
+use function array_slice;
+use function count;
+use function is_callable;
+use function is_object;
 
 /**
  * Class Iterator
  * @package Grav\Common
  */
-class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
+class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable, \Stringable
 {
     use Constructor, ArrayAccessWithGetters, ArrayIterator, Countable, Serializable, Export;
 
-    /**
-     * @var array
-     */
+    /** @var array */
     protected $items = [];
 
     /**
      * Convert function calls for the existing keys into their values.
      *
      * @param  string $key
-     * @param  mixed  $args
      * @return mixed
      */
-    public function __call($key, $args)
+    #[\ReturnTypeWillChange]
+    public function __call($key, mixed $args)
     {
-        return (isset($this->items[$key])) ? $this->items[$key] : null;
+        return $this->items[$key] ?? null;
     }
 
     /**
      * Clone the iterator.
      */
+    #[\ReturnTypeWillChange]
     public function __clone()
     {
         foreach ($this as $key => $value) {
             if (is_object($value)) {
-                $this->$key = clone $this->$key;
+                $this->{$key} = clone $this->{$key};
             }
         }
     }
@@ -50,7 +61,8 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
      *
      * @return string
      */
-    public function __toString()
+    #[\ReturnTypeWillChange]
+    public function __toString(): string
     {
         return implode(',', $this->items);
     }
@@ -58,7 +70,8 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
     /**
      * Remove item from the list.
      *
-     * @param $key
+     * @param string $key
+     * @return void
      */
     public function remove($key)
     {
@@ -84,7 +97,8 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
     public function nth($key)
     {
         $items = array_keys($this->items);
-        return (isset($items[$key])) ? $this->offsetGet($items[$key]) : false;
+
+        return isset($items[$key]) ? $this->offsetGet($items[$key]) : false;
     }
 
     /**
@@ -95,6 +109,7 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
     public function first()
     {
         $items = array_keys($this->items);
+
         return $this->offsetGet(array_shift($items));
     }
 
@@ -106,6 +121,7 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
     public function last()
     {
         $items = array_keys($this->items);
+
         return $this->offsetGet(array_pop($items));
     }
 
@@ -117,20 +133,23 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
     public function reverse()
     {
         $this->items = array_reverse($this->items);
+
         return $this;
     }
 
     /**
      * @param mixed $needle Searched value.
-     * @return string|bool  Key if found, otherwise false.
+     *
+     * @return string|int|false  Key if found, otherwise false.
      */
-    public function indexOf($needle)
+    public function indexOf(mixed $needle)
     {
         foreach (array_values($this->items) as $key => $value) {
             if ($value === $needle) {
                 return $key;
             }
         }
+
         return false;
     }
 
@@ -144,7 +163,7 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
         $keys = array_keys($this->items);
         shuffle($keys);
 
-        $new = array();
+        $new = [];
         foreach ($keys as $key) {
             $new[$key] = $this->items[$key];
         }
@@ -158,7 +177,7 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
      * Slice the list.
      *
      * @param int $offset
-     * @param int $length
+     * @param int|null $length
      * @return $this
      */
     public function slice($offset, $length = null)
@@ -171,12 +190,17 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
     /**
      * Pick one or more random entries.
      *
-     * @param int $num  Specifies how many entries should be picked.
+     * @param int $num Specifies how many entries should be picked.
      * @return $this
      */
     public function random($num = 1)
     {
-        $this->items = array_intersect_key($this->items, array_flip((array) array_rand($this->items, $num)));
+        $count = count($this->items);
+        if ($num > $count) {
+            $num = $count;
+        }
+
+        $this->items = array_intersect_key($this->items, array_flip((array)array_rand($this->items, $num)));
 
         return $this;
     }
@@ -184,7 +208,7 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
     /**
      * Append new elements to the list.
      *
-     * @param array|Iterator $items  Items to be appended. Existing keys will be overridden with the new values.
+     * @param array|Iterator $items Items to be appended. Existing keys will be overridden with the new values.
      * @return $this
      */
     public function append($items)
@@ -192,27 +216,48 @@ class Iterator implements \ArrayAccess, \Iterator, \Countable, \Serializable
         if ($items instanceof static) {
             $items = $items->toArray();
         }
-        $this->items = array_merge($this->items, (array) $items);
+        $this->items = array_merge($this->items, (array)$items);
 
         return $this;
     }
 
     /**
      * Filter elements from the list
-     * @param  callable|null $callback A function the receives ($value, $key) and must return a boolean to indicate filter status
+     *
+     * @param  callable|null $callback A function the receives ($value, $key) and must return a boolean to indicate
+     *                                 filter status
+     *
      * @return $this
      */
-    public function filter(callable $callback = null)
+    public function filter(?callable $callback = null)
     {
         foreach ($this->items as $key => $value) {
-            if (
-                ($callback && !call_user_func($callback, $value, $key)) ||
-                (!$callback && !(bool) $value)
-            ) {
+            if ((!$callback && !(bool)$value) || ($callback && !$callback($value, $key))) {
                 unset($this->items[$key]);
             }
         }
 
         return $this;
+    }
+
+
+    /**
+     * Sorts elements from the list and returns a copy of the list in the proper order
+     *
+     * @param callable|null $callback
+     * @param bool          $desc
+     * @return $this|array
+     *
+     */
+    public function sort(?callable $callback = null, $desc = false)
+    {
+        if (!$callback || !is_callable($callback)) {
+            return $this;
+        }
+
+        $items = $this->items;
+        uasort($items, $callback);
+
+        return !$desc ? $items : array_reverse($items, true);
     }
 }

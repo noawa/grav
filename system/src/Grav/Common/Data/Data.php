@@ -1,44 +1,82 @@
 <?php
-namespace Grav\Common\Data;
-
-use RocketTheme\Toolbox\ArrayTraits\ArrayAccessWithGetters;
-use RocketTheme\Toolbox\ArrayTraits\Countable;
-use RocketTheme\Toolbox\ArrayTraits\Export;
-use RocketTheme\Toolbox\File\File;
-use RocketTheme\Toolbox\File\FileInterface;
 
 /**
- * Recursive data object
+ * @package    Grav\Common\Data
  *
- * @author RocketTheme
- * @license MIT
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
  */
-class Data implements DataInterface
+
+namespace Grav\Common\Data;
+
+use ArrayAccess;
+use Exception;
+use JsonSerializable;
+use RocketTheme\Toolbox\ArrayTraits\Countable;
+use RocketTheme\Toolbox\ArrayTraits\Export;
+use RocketTheme\Toolbox\ArrayTraits\ExportInterface;
+use RocketTheme\Toolbox\ArrayTraits\NestedArrayAccessWithGetters;
+use RocketTheme\Toolbox\File\FileInterface;
+use RuntimeException;
+use function func_get_args;
+use function is_array;
+use function is_callable;
+use function is_object;
+
+/**
+ * Class Data
+ * @package Grav\Common\Data
+ */
+class Data implements DataInterface, ArrayAccess, \Countable, JsonSerializable, ExportInterface
 {
-    use ArrayAccessWithGetters, Countable, Export, DataMutatorTrait;
+    use NestedArrayAccessWithGetters, Countable, Export;
 
+    /** @var string */
     protected $gettersVariable = 'items';
+    /** @var array */
     protected $items;
-
-    /**
-     * @var Blueprints
-     */
+    /** @var Blueprint|callable|null */
     protected $blueprints;
-
-    /**
-     * @var File
-     */
+    /** @var FileInterface|null */
     protected $storage;
+
+    /** @var bool */
+    private $missingValuesAsNull = false;
+    /** @var bool */
+    private $keepEmptyValues = true;
 
     /**
      * @param array $items
-     * @param Blueprint $blueprints
+     * @param Blueprint|callable|null $blueprints
      */
-    public function __construct(array $items = array(), Blueprint $blueprints = null)
+    public function __construct(array $items = [], $blueprints = null)
     {
         $this->items = $items;
+        if (null !== $blueprints) {
+            $this->blueprints = $blueprints;
+        }
+    }
 
-        $this->blueprints = $blueprints;
+    /**
+     * @param bool $value
+     * @return $this
+     */
+    public function setKeepEmptyValues(bool $value)
+    {
+        $this->keepEmptyValues = $value;
+
+        return $this;
+    }
+
+    /**
+     * @param bool $value
+     * @return $this
+     */
+    public function setMissingValuesAsNull(bool $value)
+    {
+        $this->missingValuesAsNull = $value;
+
+        return $this;
     }
 
     /**
@@ -57,126 +95,186 @@ class Data implements DataInterface
     }
 
     /**
-     * Set default value by using dot notation for nested arrays/objects.
-     *
-     * @example $data->def('this.is.my.nested.variable', 'default');
-     *
-     * @param string  $name       Dot separated path to the requested value.
-     * @param mixed   $default    Default value (or null).
-     * @param string  $separator  Separator, defaults to '.'
-     */
-    public function def($name, $default = null, $separator = '.')
-    {
-        $this->set($name, $this->get($name, $default, $separator), $separator);
-    }
-
-    /**
-     * Join two values together by using blueprints if available.
+     * Join nested values together by using blueprints.
      *
      * @param string  $name       Dot separated path to the requested value.
      * @param mixed   $value      Value to be joined.
      * @param string  $separator  Separator, defaults to '.'
+     * @return $this
+     * @throws RuntimeException
      */
-    public function join($name, $value, $separator = '.')
+    public function join($name, mixed $value, $separator = '.')
     {
         $old = $this->get($name, null, $separator);
-        if ($old === null) {
-            // Variable does not exist yet: just use the incoming value.
-        } elseif ($this->blueprints) {
-            // Blueprints: join values by using blueprints.
-            $value = $this->blueprints->mergeData($old, $value, $name, $separator);
-        } else {
-            // No blueprints: replace existing top level variables with the new ones.
-            $value = array_merge($old, $value);
+        if ($old !== null) {
+            if (!is_array($old)) {
+                throw new RuntimeException('Value ' . $old);
+            }
+
+            if (is_object($value)) {
+                $value = (array) $value;
+            } elseif (!is_array($value)) {
+                throw new RuntimeException('Value ' . $value);
+            }
+
+            $value = $this->blueprints()->mergeData($old, $value, $name, $separator);
         }
 
         $this->set($name, $value, $separator);
+
+        return $this;
     }
 
     /**
-     * Join two values together by using blueprints if available.
+     * Get nested structure containing default values defined in the blueprints.
+     *
+     * Fields without default value are ignored in the list.
+
+     * @return array
+     */
+    public function getDefaults()
+    {
+        return $this->blueprints()->getDefaults();
+    }
+
+    /**
+     * Set default values by using blueprints.
      *
      * @param string  $name       Dot separated path to the requested value.
      * @param mixed   $value      Value to be joined.
      * @param string  $separator  Separator, defaults to '.'
+     * @return $this
      */
-    public function joinDefaults($name, $value, $separator = '.')
+    public function joinDefaults($name, mixed $value, $separator = '.')
     {
+        if (is_object($value)) {
+            $value = (array) $value;
+        }
+
         $old = $this->get($name, null, $separator);
-        if ($old === null) {
-            // Variable does not exist yet: just use the incoming value.
-        } elseif ($this->blueprints) {
-            // Blueprints: join values by using blueprints.
-            $value = $this->blueprints->mergeData($value, $old, $name, $separator);
-        } else {
-            // No blueprints: replace existing top level variables with the new ones.
-            $value = array_merge($value, $old);
+        if ($old !== null) {
+            // When every leaf in the defaults already has a key in the current data, the
+            // merge always resolves to the current data, so the (potentially expensive)
+            // blueprints load can be skipped entirely.
+            if (is_array($old) && is_array($value) && static::isNestedKeySubset($value, $old)) {
+                return $this;
+            }
+
+            $value = $this->blueprints()->mergeData($value, $old, $name, $separator);
         }
 
         $this->set($name, $value, $separator);
+
+        return $this;
+    }
+
+    /**
+     * Check if every leaf of $value already has a corresponding key in $old.
+     *
+     * @param array $value
+     * @param array $old
+     * @return bool
+     */
+    protected static function isNestedKeySubset(array $value, array $old): bool
+    {
+        foreach ($value as $key => $item) {
+            if (!array_key_exists($key, $old)) {
+                return false;
+            }
+            if (is_array($item) && $item !== []) {
+                if (!is_array($old[$key]) || !static::isNestedKeySubset($item, $old[$key])) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Get value from the configuration and join it with given data.
+     *
+     * @param string  $name       Dot separated path to the requested value.
+     * @param array|object $value      Value to be joined.
+     * @param string  $separator  Separator, defaults to '.'
+     * @return array
+     * @throws RuntimeException
+     */
+    public function getJoined($name, $value, $separator = '.')
+    {
+        if (is_object($value)) {
+            $value = (array) $value;
+        } elseif (!is_array($value)) {
+            throw new RuntimeException('Value ' . $value);
+        }
+
+        $old = $this->get($name, null, $separator);
+
+        if ($old === null) {
+            // No value set; no need to join data.
+            return $value;
+        }
+
+        if (!is_array($old)) {
+            throw new RuntimeException('Value ' . $old);
+        }
+
+        // Return joined data.
+        return $this->blueprints()->mergeData($old, $value, $name, $separator);
     }
 
 
     /**
-     * Merge two sets of data together.
+     * Merge two configurations together.
      *
      * @param array $data
-     * @return void
+     * @return $this
      */
     public function merge(array $data)
     {
-        if ($this->blueprints) {
-            $this->items = $this->blueprints->mergeData($this->items, $data);
-        } else {
-            $this->items = array_merge($this->items, $data);
-        }
+        $this->items = $this->blueprints()->mergeData($this->items, $data);
+
+        return $this;
     }
 
     /**
-     * Add default data to the set.
+     * Set default values to the configuration if variables were not set.
      *
      * @param array $data
-     * @return void
+     * @return $this
      */
     public function setDefaults(array $data)
     {
-        if ($this->blueprints) {
-            $this->items = $this->blueprints->mergeData($data, $this->items);
-        } else {
-            $this->items = array_merge($data, $this->items);
-        }
-    }
+        $this->items = $this->blueprints()->mergeData($data, $this->items);
 
-    /**
-     * Return blueprints.
-     *
-     * @return Blueprint
-     */
-    public function blueprints()
-    {
-        return $this->blueprints;
+        return $this;
     }
 
     /**
      * Validate by blueprints.
      *
-     * @throws \Exception
+     * @return $this
+     * @throws Exception
      */
     public function validate()
     {
-        if ($this->blueprints) {
-            $this->blueprints->validate($this->items);
-        }
+        $this->blueprints()->validate($this->items);
+
+        return $this;
     }
 
     /**
-     * Filter all items by using blueprints.
+     * @return $this
      */
     public function filter()
     {
-        if ($this->blueprints) {
-            $this->items = $this->blueprints->filter($this->items);
-        }
+        $args = func_get_args();
+        $missingValuesAsNull = (bool)(array_shift($args) ?? $this->missingValuesAsNull);
+        $keepEmptyValues = (bool)(array_shift($args) ?? $this->keepEmptyValues);
+
+        $this->items = $this->blueprints()->filter($this->items, $missingValuesAsNull, $keepEmptyValues);
+
+        return $this;
     }
 
     /**
@@ -186,11 +284,32 @@ class Data implements DataInterface
      */
     public function extra()
     {
-        return $this->blueprints ? $this->blueprints->extra($this->items) : array();
+        return $this->blueprints()->extra($this->items);
+    }
+
+    /**
+     * Return blueprints.
+     *
+     * @return Blueprint
+     */
+    public function blueprints()
+    {
+        if (null === $this->blueprints) {
+            $this->blueprints = new Blueprint();
+        } elseif (is_callable($this->blueprints)) {
+            // Lazy load blueprints.
+            $blueprints = $this->blueprints;
+            $this->blueprints = $blueprints();
+        }
+
+        return $this->blueprints;
     }
 
     /**
      * Save data if storage has been defined.
+     *
+     * @return void
+     * @throws RuntimeException
      */
     public function save()
     {
@@ -209,7 +328,9 @@ class Data implements DataInterface
      */
     public function exists()
     {
-        return $this->file()->exists();
+        $file = $this->file();
+
+        return $file && $file->exists();
     }
 
     /**
@@ -221,20 +342,32 @@ class Data implements DataInterface
      */
     public function raw()
     {
-        return $this->file()->raw();
+        $file = $this->file();
+
+        return $file ? $file->raw() : '';
     }
 
     /**
      * Set or get the data storage.
      *
-     * @param FileInterface $storage Optionally enter a new storage.
-     * @return FileInterface
+     * @param FileInterface|null $storage Optionally enter a new storage.
+     * @return FileInterface|null
      */
-    public function file(FileInterface $storage = null)
+    public function file(?FileInterface $storage = null)
     {
         if ($storage) {
             $this->storage = $storage;
         }
+
         return $this->storage;
+    }
+
+    /**
+     * @return array
+     */
+    #[\ReturnTypeWillChange]
+    public function jsonSerialize()
+    {
+        return $this->items;
     }
 }

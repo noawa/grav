@@ -1,40 +1,101 @@
 <?php
+
+/**
+ * @package    Grav\Common\Page
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common\Page;
 
+use Grav\Common\Data\Blueprint;
 use Grav\Common\Filesystem\Folder;
+use Grav\Common\Grav;
+use Grav\Common\Utils;
+use InvalidArgumentException;
 use RocketTheme\Toolbox\ArrayTraits\ArrayAccess;
 use RocketTheme\Toolbox\ArrayTraits\Constructor;
 use RocketTheme\Toolbox\ArrayTraits\Countable;
 use RocketTheme\Toolbox\ArrayTraits\Export;
 use RocketTheme\Toolbox\ArrayTraits\Iterator;
+use RocketTheme\Toolbox\ResourceLocator\UniformResourceLocator;
+use function is_string;
 
+/**
+ * Class Types
+ * @package Grav\Common\Page
+ */
 class Types implements \ArrayAccess, \Iterator, \Countable
 {
     use ArrayAccess, Constructor, Iterator, Countable, Export;
 
+    /** @var array */
     protected $items;
-    protected $systemBlueprints;
+    /** @var array */
+    protected $systemBlueprints = [];
 
+    /**
+     * @param string $type
+     * @param Blueprint|null $blueprint
+     * @return void
+     */
     public function register($type, $blueprint = null)
     {
-        if (!$blueprint && $this->systemBlueprints && isset($this->systemBlueprints[$type])) {
-            $useBlueprint = $this->systemBlueprints[$type];
-        } else {
-            $useBlueprint = $blueprint;
+        if (!isset($this->items[$type])) {
+            $this->items[$type] = [];
+        } elseif (null === $blueprint) {
+            return;
         }
 
-        if ($blueprint || empty($this->items[$type])) {
-            $this->items[$type] = $useBlueprint;
+        if (null === $blueprint) {
+            $blueprint = $this->systemBlueprints[$type] ?? $this->systemBlueprints['default'] ?? null;
+        }
+
+        if ($blueprint) {
+            array_unshift($this->items[$type], $blueprint);
         }
     }
 
-    public function scanBlueprints($paths)
+    /**
+     * @return void
+     */
+    public function init()
     {
-        $this->items = $this->findBlueprints($paths) + $this->items;
+        if (empty($this->systemBlueprints)) {
+            // Register all blueprints from the blueprints stream.
+            $this->systemBlueprints = $this->findBlueprints('blueprints://pages');
+            foreach ($this->systemBlueprints as $type => $blueprint) {
+                $this->register($type);
+            }
+        }
     }
 
-    public function scanTemplates($paths)
+    /**
+     * @param string $uri
+     * @return void
+     */
+    public function scanBlueprints($uri)
     {
+        if (!is_string($uri)) {
+            throw new InvalidArgumentException('First parameter must be URI');
+        }
+
+        foreach ($this->findBlueprints($uri) as $type => $blueprint) {
+            $this->register($type, $blueprint);
+        }
+    }
+
+    /**
+     * @param string $uri
+     * @return void
+     */
+    public function scanTemplates($uri)
+    {
+        if (!is_string($uri)) {
+            throw new InvalidArgumentException('First parameter must be URI');
+        }
+
         $options = [
             'compare' => 'Filename',
             'pattern' => '|\.html\.twig$|',
@@ -45,53 +106,57 @@ class Types implements \ArrayAccess, \Iterator, \Countable
             'recursive' => false
         ];
 
-        if (!$this->systemBlueprints) {
-            $this->systemBlueprints = $this->findBlueprints('blueprints://pages');
+        foreach (Folder::all($uri, $options) as $type) {
+            $this->register($type);
         }
 
-        // register default by default
-        $this->register('default');
-
-        foreach ((array) $paths as $path) {
-            foreach (Folder::all($path, $options) as $type) {
-                $this->register($type);
-            }
-            $modular_path = rtrim($path, '/') . '/modular';
-            if (file_exists($modular_path)) {
-                foreach (Folder::all($modular_path, $options) as $type) {
-                    $this->register('modular/' . $type);
-                }
+        $modular_uri = rtrim($uri, '/') . '/modular';
+        if (is_dir($modular_uri)) {
+            foreach (Folder::all($modular_uri, $options) as $type) {
+                $this->register('modular/' . $type);
             }
         }
     }
 
+    /**
+     * @return array
+     */
     public function pageSelect()
     {
         $list = [];
         foreach ($this->items as $name => $file) {
-            if (strpos($name, '/')) {
+            if (strpos((string) $name, '/')) {
                 continue;
             }
-            $list[$name] = ucfirst(strtr($name, '_', ' '));
+            $list[$name] = ucfirst(str_replace('_', ' ', $name));
         }
         ksort($list);
+
         return $list;
     }
 
+    /**
+     * @return array
+     */
     public function modularSelect()
     {
         $list = [];
         foreach ($this->items as $name => $file) {
-            if (strpos($name, 'modular/') !== 0) {
+            if (!str_starts_with((string) $name, 'modular/')) {
                 continue;
             }
-            $list[$name] = trim(ucfirst(strtr(basename($name), '_', ' ')));
+            $list[$name] = ucfirst(trim(str_replace('_', ' ', Utils::basename($name))));
         }
         ksort($list);
+
         return $list;
     }
 
-    private function findBlueprints($paths)
+    /**
+     * @param string $uri
+     * @return array
+     */
+    private function findBlueprints($uri)
     {
         $options = [
             'compare' => 'Filename',
@@ -103,8 +168,12 @@ class Types implements \ArrayAccess, \Iterator, \Countable
             'value' => 'PathName',
         ];
 
-        foreach ((array) $paths as $path) {
-            return Folder::all($path, $options);
+        /** @var UniformResourceLocator $locator */
+        $locator = Grav::instance()['locator'];
+        if ($locator->isStream($uri)) {
+            $options['value'] = 'Url';
         }
+
+        return Folder::all($uri, $options);
     }
 }

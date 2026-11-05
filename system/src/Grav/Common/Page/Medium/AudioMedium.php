@@ -1,34 +1,24 @@
 <?php
+
+/**
+ * @package    Grav\Common\Page
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common\Page\Medium;
 
-use Grav\Common\Config\Config;
-use Grav\Common\File\CompiledYamlFile;
-use Grav\Common\Grav;
-use Grav\Common\GravTrait;
-use Grav\Common\Data\Blueprint;
-use Grav\Common\Data\Data;
+use Grav\Common\Media\Interfaces\AudioMediaInterface;
+use Grav\Common\Media\Traits\AudioMediaTrait;
 
-class AudioMedium extends Medium
+/**
+ * Class AudioMedium
+ * @package Grav\Common\Page\Medium
+ */
+class AudioMedium extends Medium implements AudioMediaInterface
 {
-    use StaticResizeTrait;
-
-    /**
-     * Parsedown element for source display mode
-     *
-     * @param  array $attributes
-     * @param  boolean $reset
-     * @return array
-     */
-    protected function sourceParsedownElement(array $attributes, $reset = true)
-    {
-        $location = $this->url($reset);
-
-        return [
-            'name' => 'audio',
-            'text' => '<source src="' . $location . '">Your browser does not support the audio tag.',
-            'attributes' => $attributes
-        ];
-    }
+    use AudioMediaTrait;
 
     /**
      * Reset medium.
@@ -39,7 +29,8 @@ class AudioMedium extends Medium
     {
         parent::reset();
 
-        $this->attributes['controls'] = true;
+        $this->resetPlayer();
+
         return $this;
     }
 }

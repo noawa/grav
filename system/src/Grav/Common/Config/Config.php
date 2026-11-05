@@ -1,485 +1,156 @@
 <?php
-namespace Grav\Common\Config;
-
-use Grav\Common\File\CompiledYamlFile;
-use Grav\Common\Grav;
-use Grav\Common\Data\Data;
-use RocketTheme\Toolbox\Blueprints\Blueprints;
-use RocketTheme\Toolbox\File\PhpFile;
-use RocketTheme\Toolbox\ResourceLocator\UniformResourceLocator;
 
 /**
- * The Config class contains configuration information.
+ * @package    Grav\Common\Config
  *
- * @author RocketTheme
- * @license MIT
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
+namespace Grav\Common\Config;
+
+use Grav\Common\Debugger;
+use Grav\Common\Grav;
+use Grav\Common\Data\Data;
+use Grav\Common\Service\ConfigServiceProvider;
+use Grav\Common\Utils;
+use function is_array;
+
+/**
+ * Class Config
+ * @package Grav\Common\Config
  */
 class Config extends Data
 {
-    protected $grav;
-    protected $streams = [
-        'system' => [
-            'type' => 'ReadOnlyStream',
-            'prefixes' => [
-                '' => ['system'],
-            ]
-        ],
-        'user' => [
-            'type' => 'ReadOnlyStream',
-            'prefixes' => [
-                '' => ['user'],
-            ]
-        ],
-        'asset' => [
-            'type' => 'ReadOnlyStream',
-            'prefixes' => [
-                '' => ['assets'],
-            ]
-        ],
-        'blueprints' => [
-            'type' => 'ReadOnlyStream',
-            'prefixes' => [
-                '' => ['user://blueprints', 'system/blueprints'],
-            ]
-        ],
-        'config' => [
-            'type' => 'ReadOnlyStream',
-            'prefixes' => [
-                '' => ['user://config', 'system/config'],
-            ]
-        ],
-        'plugins' => [
-            'type' => 'ReadOnlyStream',
-            'prefixes' => [
-                '' => ['user://plugins'],
-             ]
-        ],
-        'plugin' => [
-            'type' => 'ReadOnlyStream',
-            'prefixes' => [
-                '' => ['user://plugins'],
-            ]
-        ],
-        'themes' => [
-            'type' => 'ReadOnlyStream',
-            'prefixes' => [
-                '' => ['user://themes'],
-            ]
-        ],
-        'languages' => [
-            'type' => 'ReadOnlyStream',
-            'prefixes' => [
-                '' => ['user://languages', 'system/languages'],
-            ]
-        ],
-        'cache' => [
-            'type' => 'Stream',
-            'prefixes' => [
-                '' => ['cache'],
-                'images' => ['images']
-            ]
-        ],
-        'log' => [
-            'type' => 'Stream',
-            'prefixes' => [
-                '' => ['logs']
-            ]
-        ],
-        'backup' => [
-            'type' => 'Stream',
-            'prefixes' => [
-                '' => ['backup']
-            ]
-        ]
-    ];
+    /** @var string */
+    public $environment;
 
-    protected $setup = [];
-
-    protected $blueprintFiles = [];
-    protected $configFiles = [];
-    protected $languageFiles = [];
+    /** @var string */
+    protected $key;
+    /** @var string */
     protected $checksum;
-    protected $timestamp;
+    /** @var int */
+    protected $timestamp = 0;
+    /** @var bool */
+    protected $modified = false;
 
-    protected $configLookup;
-    protected $blueprintLookup;
-    protected $pluginLookup;
-    protected $languagesLookup;
-
-    protected $finder;
-    protected $environment;
-    protected $messages = [];
-
-    protected $languages;
-
-    public function __construct(array $setup = array(), Grav $grav = null, $environment = null)
-    {
-        $this->grav = $grav ?: Grav::instance();
-        $this->finder = new ConfigFinder;
-        $this->environment = $environment ?: 'localhost';
-        $this->messages[] = 'Environment Name: ' . $this->environment;
-
-        // Make sure that
-        if (!isset($setup['streams']['schemes'])) {
-            $setup['streams']['schemes'] = [];
-        }
-        $setup['streams']['schemes'] += $this->streams;
-
-        $setup = $this->autoDetectEnvironmentConfig($setup);
-
-        $this->setup = $setup;
-        parent::__construct($setup);
-
-        $this->check();
-    }
-
+    /**
+     * @return string
+     */
     public function key()
     {
-        return $this->checksum();
-    }
-
-    public function reload()
-    {
-        $this->items = $this->setup;
-        $this->check();
-        $this->init();
-        $this->debug();
-
-        return $this;
-    }
-
-    protected function check()
-    {
-        $streams = isset($this->items['streams']['schemes']) ? $this->items['streams']['schemes'] : null;
-        if (!is_array($streams)) {
-            throw new \InvalidArgumentException('Configuration is missing streams.schemes!');
-        }
-        $diff = array_keys(array_diff_key($this->streams, $streams));
-        if ($diff) {
-            throw new \InvalidArgumentException(
-                sprintf('Configuration is missing keys %s from streams.schemes!', implode(', ', $diff))
-            );
-        }
-    }
-
-    public function debug()
-    {
-        foreach ($this->messages as $message) {
-            $this->grav['debugger']->addMessage($message);
-        }
-        $this->messages = [];
-    }
-
-    public function init()
-    {
-        /** @var UniformResourceLocator $locator */
-        $locator = $this->grav['locator'];
-
-        $this->configLookup = $locator->findResources('config://');
-        $this->blueprintLookup = $locator->findResources('blueprints://config');
-        $this->pluginLookup = $locator->findResources('plugins://');
-
-
-        $this->loadCompiledBlueprints($this->blueprintLookup, $this->pluginLookup, 'master');
-        $this->loadCompiledConfig($this->configLookup, $this->pluginLookup, 'master');
-
-        // process languages if supported
-        if ($this->get('system.languages.translations', true)) {
-            $this->languagesLookup = $locator->findResources('languages://');
-            $this->loadCompiledLanguages($this->languagesLookup, $this->pluginLookup, 'master');
+        if (null === $this->key) {
+            $this->key = md5($this->checksum . $this->timestamp);
         }
 
-        $this->initializeLocator($locator);
+        return $this->key;
     }
 
-    public function checksum()
+    /**
+     * @param string|null $checksum
+     * @return string|null
+     */
+    public function checksum($checksum = null)
     {
-        if (empty($this->checksum)) {
-            $checkBlueprints = $this->get('system.cache.check.blueprints', false);
-            $checkLanguages = $this->get('system.cache.check.languages', false);
-            $checkConfig = $this->get('system.cache.check.config', true);
-            $checkSystem = $this->get('system.cache.check.system', true);
-
-            if (!$checkBlueprints && !$checkLanguages && !$checkConfig && !$checkSystem) {
-                $this->messages[] = 'Skip configuration timestamp check.';
-                return false;
-            }
-
-            // Generate checksum according to the configuration settings.
-            if (!$checkConfig) {
-                // Just check changes in system.yaml files and ignore all the other files.
-                $cc = $checkSystem ? $this->finder->locateConfigFile($this->configLookup, 'system') : [];
-            } else {
-                // Check changes in all configuration files.
-                $cc = $this->finder->locateConfigFiles($this->configLookup, $this->pluginLookup);
-            }
-
-            if ($checkBlueprints) {
-                $cb = $this->finder->locateBlueprintFiles($this->blueprintLookup, $this->pluginLookup);
-            } else {
-                $cb = [];
-            }
-
-            if ($checkLanguages) {
-                $cl = $this->finder->locateLanguageFiles($this->languagesLookup, $this->pluginLookup);
-            } else {
-                $cl = [];
-            }
-
-            $this->checksum = md5(json_encode([$cc, $cb, $cl]));
+        if ($checksum !== null) {
+            $this->checksum = $checksum;
         }
 
         return $this->checksum;
     }
 
-    protected function autoDetectEnvironmentConfig($items)
+    /**
+     * @param bool|null $modified
+     * @return bool
+     */
+    public function modified($modified = null)
     {
-        $environment = $this->environment;
-        $env_stream = 'user://'.$environment.'/config';
-
-        if (file_exists(USER_DIR.$environment.'/config')) {
-            array_unshift($items['streams']['schemes']['config']['prefixes'][''], $env_stream);
+        if ($modified !== null) {
+            $this->modified = $modified;
         }
 
-        return $items;
-    }
-
-    protected function loadCompiledBlueprints($blueprints, $plugins, $filename = null)
-    {
-        $checksum = md5(json_encode($blueprints));
-        $filename = $filename
-            ? CACHE_DIR . 'compiled/blueprints/' . $filename . '-' . $this->environment . '.php'
-            : CACHE_DIR . 'compiled/blueprints/' . $checksum . '-' . $this->environment . '.php';
-        $file = PhpFile::instance($filename);
-        $cache = $file->exists() ? $file->content() : null;
-        $blueprintFiles = $this->finder->locateBlueprintFiles($blueprints, $plugins);
-        $checksum .= ':'.md5(json_encode($blueprintFiles));
-        $class = get_class($this);
-
-        // Load real file if cache isn't up to date (or is invalid).
-        if (
-            !is_array($cache)
-            || !isset($cache['checksum'])
-            || !isset($cache['@class'])
-            || $cache['checksum'] != $checksum
-            || $cache['@class'] != $class
-        ) {
-            // Attempt to lock the file for writing.
-            $file->lock(false);
-
-            // Load blueprints.
-            $this->blueprints = new Blueprints;
-            foreach ($blueprintFiles as $files) {
-                $this->loadBlueprintFiles($files);
-            }
-
-            $cache = [
-                '@class' => $class,
-                'checksum' => $checksum,
-                'files' => $blueprintFiles,
-                'data' => $this->blueprints->toArray()
-            ];
-            // If compiled file wasn't already locked by another process, save it.
-            if ($file->locked() !== false) {
-                $this->messages[] = 'Saving compiled blueprints.';
-                $file->save($cache);
-                $file->unlock();
-            }
-        } else {
-            $this->blueprints = new Blueprints($cache['data']);
-        }
-    }
-
-    protected function loadCompiledConfig($configs, $plugins, $filename = null)
-    {
-        $filename = $filename
-            ? CACHE_DIR . 'compiled/config/' . $filename . '-' . $this->environment . '.php'
-            : CACHE_DIR . 'compiled/config/' . $checksum . '-' . $this->environment . '.php';
-        $file = PhpFile::instance($filename);
-        $cache = $file->exists() ? $file->content() : null;
-        $class = get_class($this);
-        $checksum = $this->checksum();
-
-        if (
-            !is_array($cache)
-            || !isset($cache['checksum'])
-            || !isset($cache['@class'])
-            || $cache['@class'] != $class
-        ) {
-            $this->messages[] = 'No cached configuration, compiling new configuration..';
-        } else if ($cache['checksum'] !== $checksum) {
-            $this->messages[] = 'Configuration checksum mismatch, reloading configuration..';
-        } else {
-            $this->messages[] = 'Configuration checksum matches, using cached version.';
-
-            $this->items = $cache['data'];
-            return;
-        }
-
-        $configFiles = $this->finder->locateConfigFiles($configs, $plugins);
-
-        // Attempt to lock the file for writing.
-        $file->lock(false);
-
-        // Load configuration.
-        foreach ($configFiles as $files) {
-            $this->loadConfigFiles($files);
-        }
-        $cache = [
-            '@class' => $class,
-            'timestamp' => time(),
-            'checksum' => $checksum,
-            'data' => $this->toArray()
-        ];
-
-        // If compiled file wasn't already locked by another process, save it.
-        if ($file->locked() !== false) {
-            $this->messages[] = 'Saving compiled configuration.';
-            $file->save($cache);
-            $file->unlock();
-        }
-
-        $this->items = $cache['data'];
+        return $this->modified;
     }
 
     /**
-     * @param      $languages
-     * @param      $plugins
-     * @param null $filename
+     * @param int|null $timestamp
+     * @return int
      */
-    protected function loadCompiledLanguages($languages, $plugins, $filename = null)
+    public function timestamp($timestamp = null)
     {
-        $checksum = md5(json_encode($languages));
-        $filename = $filename
-            ? CACHE_DIR . 'compiled/languages/' . $filename . '-' . $this->environment . '.php'
-            : CACHE_DIR . 'compiled/languages/' . $checksum . '-' . $this->environment . '.php';
-        $file = PhpFile::instance($filename);
-        $cache = $file->exists() ? $file->content() : null;
-        $languageFiles = $this->finder->locateLanguageFiles($languages, $plugins);
-        $checksum .= ':' . md5(json_encode($languageFiles));
-        $class = get_class($this);
+        if ($timestamp !== null) {
+            $this->timestamp = $timestamp;
+        }
 
-        // Load real file if cache isn't up to date (or is invalid).
-        if (
-            !is_array($cache)
-            || !isset($cache['checksum'])
-            || !isset($cache['@class'])
-            || $cache['checksum'] != $checksum
-            || $cache['@class'] != $class
-        ) {
-            // Attempt to lock the file for writing.
-            $file->lock(false);
+        return $this->timestamp;
+    }
 
-            // Load languages.
-            $this->languages = new Languages;
-            $pluginPaths = str_ireplace(GRAV_ROOT . '/', '', array_reverse($plugins));
-            foreach ($pluginPaths as $path) {
-                if (isset($languageFiles[$path])) {
-                    foreach ((array) $languageFiles[$path] as $plugin => $item) {
-                        $lang_file = CompiledYamlFile::instance($item['file']);
-                        $content = $lang_file->content();
-                        $this->languages->mergeRecursive($content);
-                    }
-                    unset($languageFiles[$path]);
-                }
-            }
+    /**
+     * @return $this
+     */
+    public function reload()
+    {
+        $grav = Grav::instance();
 
-            foreach ($languageFiles as $location) {
-                foreach ($location as $lang => $item) {
-                    $lang_file = CompiledYamlFile::instance($item['file']);
-                    $content = $lang_file->content();
-                    $this->languages->join($lang, $content, '/');
-                }
-            }
+        // Load new configuration.
+        $config = ConfigServiceProvider::load($grav);
 
-            $cache = [
-                '@class'   => $class,
-                'checksum' => $checksum,
-                'files'    => $languageFiles,
-                'data'     => $this->languages->toArray()
-            ];
-            // If compiled file wasn't already locked by another process, save it.
-            if ($file->locked() !== false) {
-                $this->messages[] = 'Saving compiled languages.';
-                $file->save($cache);
-                $file->unlock();
-            }
-        } else {
-            $this->languages = new Languages($cache['data']);
+        /** @var Debugger $debugger */
+        $debugger = $grav['debugger'];
+
+        if ($config->modified()) {
+            // Update current configuration.
+            $this->items = $config->toArray();
+            $this->checksum($config->checksum());
+            $this->modified(true);
+
+            $debugger->addMessage('Configuration was changed and saved.');
+        }
+
+        return $this;
+    }
+
+    /**
+     * @return void
+     */
+    public function debug()
+    {
+        /** @var Debugger $debugger */
+        $debugger = Grav::instance()['debugger'];
+
+        $debugger->addMessage('Environment Name: ' . $this->environment);
+        if ($this->modified()) {
+            $debugger->addMessage('Configuration reloaded and cached.');
         }
     }
 
     /**
-     * Load blueprints.
-     *
-     * @param array  $files
+     * @return void
      */
-    public function loadBlueprintFiles(array $files)
+    public function init()
     {
-        foreach ($files as $name => $item) {
-            $file = CompiledYamlFile::instance($item['file']);
-            $this->blueprints->embed($name, $file->content(), '/');
+        $setup = Grav::instance()['setup']->toArray();
+        foreach ($setup as $key => $value) {
+            if ($key === 'streams' || !is_array($value)) {
+                // Optimized as streams and simple values are fully defined in setup.
+                $this->items[$key] = $value;
+            } else {
+                $this->joinDefaults($key, $value);
+            }
         }
+
+        // Legacy value - Override the media.upload_limit based on PHP values
+        $this->items['system']['media']['upload_limit'] = Utils::getUploadLimit();
     }
 
     /**
-     * Load configuration.
-     *
-     * @param array  $files
+     * @return mixed
+     * @deprecated 1.5 Use Grav::instance()['languages'] instead.
      */
-    public function loadConfigFiles(array $files)
-    {
-        foreach ($files as $name => $item) {
-            $file = CompiledYamlFile::instance($item['file']);
-            $this->join($name, $file->content(), '/');
-        }
-    }
-
-    /**
-     * Initialize resource locator by using the configuration.
-     *
-     * @param UniformResourceLocator $locator
-     */
-    public function initializeLocator(UniformResourceLocator $locator)
-    {
-        $locator->reset();
-
-        $schemes = (array) $this->get('streams.schemes', []);
-
-        foreach ($schemes as $scheme => $config) {
-            if (isset($config['paths'])) {
-                $locator->addPath($scheme, '', $config['paths']);
-            }
-            if (isset($config['prefixes'])) {
-                foreach ($config['prefixes'] as $prefix => $paths) {
-                    $locator->addPath($scheme, $prefix, $paths);
-                }
-            }
-        }
-    }
-
-    /**
-     * Get available streams and their types from the configuration.
-     *
-     * @return array
-     */
-    public function getStreams()
-    {
-        $schemes = [];
-        foreach ((array) $this->get('streams.schemes') as $scheme => $config) {
-            $type = !empty($config['type']) ? $config['type'] : 'ReadOnlyStream';
-            if ($type[0] != '\\') {
-                $type = '\\RocketTheme\\Toolbox\\StreamWrapper\\' . $type;
-            }
-
-            $schemes[$scheme] = $type;
-        }
-
-        return $schemes;
-    }
-
     public function getLanguages()
     {
-        return $this->languages;
+        user_error(self::class . '::' . __FUNCTION__ . '() is deprecated since Grav 1.5, use Grav::instance()[\'languages\'] instead', E_USER_DEPRECATED);
+
+        return Grav::instance()['languages'];
     }
 }

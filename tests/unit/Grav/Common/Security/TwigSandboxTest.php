@@ -1,0 +1,1241 @@
+<?php
+
+use Grav\Common\Security;
+use Twig\Environment;
+use Twig\Extension\SandboxExtension;
+use Twig\Extension\StringLoaderExtension;
+use Twig\Loader\ArrayLoader;
+use Twig\Sandbox\SecurityError;
+use Twig\Sandbox\SecurityNotAllowedFilterError;
+use Twig\Sandbox\SecurityNotAllowedFunctionError;
+use Twig\Sandbox\SecurityNotAllowedMethodError;
+use Twig\Sandbox\SecurityNotAllowedTagError;
+use Twig\Sandbox\SecurityPolicyInterface;
+use Twig\TwigFunction;
+
+/**
+ * Tests for the Twig sandbox policy wired up by Security::buildTwigSandboxPolicy()
+ * and the SandboxExtension integration in Twig::processPage()/processString().
+ *
+ * Covers SSTI advisory vectors:
+ * - attribute(grav, 'scheduler') + bracket notation runtime-constructed names
+ * - base64 / concat-constructed function names resolved at runtime
+ * - svg_image / read_file / evaluate / evaluate_twig / template_from_string / constant
+ * - pure container traversal (grav['flex'], grav['config'].get(...))
+ */
+class TwigSandboxTest extends \PHPUnit\Framework\TestCase
+{
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // Reset Security's policy cache between tests
+        $reflection = new ReflectionClass(Security::class);
+        foreach (['twigSandboxPolicy', 'twigSandboxPolicyKey'] as $prop) {
+            if ($reflection->hasProperty($prop)) {
+                $p = $reflection->getProperty($prop);
+                $p->setAccessible(true);
+                $p->setValue(null, null);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Policy construction from config defaults
+    // =========================================================================
+
+    public function testBuildPolicy_ReturnsSecurityPolicyInterface(): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        self::assertInstanceOf(SecurityPolicyInterface::class, $policy);
+    }
+
+    public function testBuildPolicy_AllowedFiltersIncludesEscape(): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        // escape/upper/lower are foundational; must pass
+        $this->assertDoesNotThrow(fn() => $policy->checkSecurity([], ['escape'], []));
+        $this->assertDoesNotThrow(fn() => $policy->checkSecurity([], ['upper'], []));
+        $this->assertDoesNotThrow(fn() => $policy->checkSecurity([], ['lower'], []));
+    }
+
+    /**
+     * @dataProvider providerForbiddenFunctions
+     */
+    public function testBuildPolicy_BlocksForbiddenFunctions(string $fn, string $why): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $this->expectException(SecurityNotAllowedFunctionError::class);
+        $policy->checkSecurity([], [], [$fn]);
+        self::fail("Function '$fn' should be blocked: $why");
+    }
+
+    public static function providerForbiddenFunctions(): array
+    {
+        return [
+            ['evaluate',             'GHSA-8w8h / GHSA-662m SSTI primitive'],
+            ['evaluate_twig',        'GHSA-phwm / GHSA-pmp3 / GHSA-8rw8 SSTI primitive'],
+            ['svg_image',            'GHSA-hxvg LFI primitive'],
+            ['read_file',            'GHSA-r7v4 / GHSA-wxfv / GHSA-rmf6 LFI primitive'],
+            ['redirect_me',          'response hijack'],
+            ['http_response_code',   'response hijack'],
+            ['template_from_string', 'GHSA-v94j / GHSA-pm82 SSTI vector'],
+            ['constant',             'exposes PHP_VERSION / GRAV_ROOT for GHSA-phwm chain'],
+            ['source',               'arbitrary template file read'],
+            ['include',              'function form; tag form is bounded by loader'],
+            // FilesystemExtension probes (GHSA-x2cf)
+            ['is_readable',     'filesystem probe'],
+            ['lstat',           'filesystem probe'],
+            ['sha1_file',       'filesystem probe / hash grinding'],
+            ['md5_file',        'filesystem probe / hash grinding'],
+            ['hash_file',       'filesystem probe / hash grinding'],
+            ['file_exists',     'filesystem probe'],
+            ['filesize',        'filesystem probe'],
+            ['filetype',        'filesystem probe'],
+            ['pathinfo',        'filesystem probe'],
+            ['exif_read_data',  'filesystem probe'],
+        ];
+    }
+
+    /**
+     * @dataProvider providerForbiddenFilters
+     */
+    public function testBuildPolicy_BlocksForbiddenFilters(string $filter): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $this->expectException(SecurityNotAllowedFilterError::class);
+        $policy->checkSecurity([], [$filter], []);
+    }
+
+    public static function providerForbiddenFilters(): array
+    {
+        // Filesystem filters registered by FilesystemExtension — none should be allowed
+        return [
+            ['is_readable'],
+            ['is_writable'],
+            ['lstat'],
+            ['sha1_file'],
+            ['md5_file'],
+            ['hash_file'],
+            ['file_exists'],
+            ['filesize'],
+            ['exif_read_data'],
+        ];
+    }
+
+    /**
+     * @dataProvider providerForbiddenTags
+     */
+    public function testBuildPolicy_BlocksForbiddenTags(string $tag): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $this->expectException(SecurityNotAllowedTagError::class);
+        $policy->checkSecurity([$tag], [], []);
+    }
+
+    public static function providerForbiddenTags(): array
+    {
+        return [
+            ['flush'],      // not in allowlist
+            ['cache'],      // CacheExtension tag — not in the core allowlist
+            ['arbitrary'],  // unknown tag
+        ];
+    }
+
+    public function testBuildPolicy_AllowsCommonContentTags(): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $this->assertDoesNotThrow(fn() => $policy->checkSecurity(['if', 'for', 'set', 'include', 'block', 'extends'], [], []));
+    }
+
+    // =========================================================================
+    // Method allowlist: Grav container traversal is gated by per-service methods
+    // =========================================================================
+
+    public function testBuildPolicy_BlocksConfigSet(): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $config = new \Grav\Common\Config\Config([]);
+        $this->expectException(SecurityNotAllowedMethodError::class);
+        $policy->checkMethodAllowed($config, 'set');
+    }
+
+    public function testBuildPolicy_BlocksConfigMerge(): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $config = new \Grav\Common\Config\Config([]);
+        $this->expectException(SecurityNotAllowedMethodError::class);
+        $policy->checkMethodAllowed($config, 'merge');
+    }
+
+    public function testBuildPolicy_AllowsConfigGet(): void
+    {
+        // Config.get is in the YAML allowlist, but the policy builder strips
+        // the whole Config class when security.twig_content.config_access is
+        // off (the 2.0 default). Enable the gate here so we exercise the
+        // YAML-configured allowlist; the strip behavior is covered separately
+        // by the SandboxConfig facade tests below.
+        $grav = \Grav\Common\Grav::instance();
+        $previous = $grav['config']->get('security.twig_content.config_access');
+        $grav['config']->set('security.twig_content.config_access', true);
+        try {
+            $policy = Security::buildTwigSandboxPolicy();
+            $config = new \Grav\Common\Config\Config([]);
+            $this->assertDoesNotThrow(fn() => $policy->checkMethodAllowed($config, 'get'));
+        } finally {
+            $grav['config']->set('security.twig_content.config_access', $previous);
+        }
+    }
+
+    /**
+     * GHSA-58hj-46fw-rcfm: a low-privilege editor with page-update access
+     * injected `{% set x = grav['accounts'].load(...) %} {{ x.set(...) }} {{ x.save() }}`
+     * from page content to mint a super-admin. The sandbox allows
+     * `grav.offsetGet('accounts')` (container traversal is deliberately permitted),
+     * but the returned UserCollection is not in `allowed_methods`, so `load()` /
+     * `save()` / `set()` on it must be denied.
+     */
+    public function testBuildPolicy_GHSA58hj_BlocksAccountsCollectionMethods(): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $accounts = new \Grav\Common\User\DataUser\UserCollection(\Grav\Common\User\User::class);
+
+        foreach (['load', 'save', 'set', '__set'] as $method) {
+            try {
+                $policy->checkMethodAllowed($accounts, $method);
+                self::fail("UserCollection::{$method} must be blocked (GHSA-58hj-46fw-rcfm)");
+            } catch (SecurityNotAllowedMethodError $e) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    /**
+     * Sandboxed content reads only the named account fields, and no by-key
+     * getter is callable on an account. A regular account is also a Data
+     * object, so this holds whatever `config_access` is set to.
+     *
+     * @dataProvider providerConfigAccess
+     */
+    public function testBuildPolicy_BlocksByKeyGettersOnAccounts(bool $configAccess): void
+    {
+        $grav = \Grav\Common\Grav::instance();
+        $previous = $grav['config']->get('security.twig_content.config_access');
+        $grav['config']->set('security.twig_content.config_access', $configAccess);
+        try {
+            $policy = Security::buildTwigSandboxPolicy();
+            $account = new \Grav\Common\User\DataUser\User(['username' => 'admin', 'email' => 'admin@example.com', 'hashed_password' => 'secret']);
+
+            foreach (['offsetGet', 'offsetExists', 'get', 'value', 'getProperty', 'toArray'] as $method) {
+                try {
+                    $policy->checkMethodAllowed($account, $method);
+                    self::fail("UserInterface::{$method} must be blocked (config_access=" . var_export($configAccess, true) . ')');
+                } catch (SecurityNotAllowedMethodError $e) {
+                    $this->addToAssertionCount(1);
+                }
+            }
+
+            $this->assertDoesNotThrow(fn() => $policy->checkMethodAllowed($account, 'authorize'));
+            foreach (['username', 'email', 'fullname', 'authenticated'] as $property) {
+                $this->assertDoesNotThrow(fn() => $policy->checkPropertyAllowed($account, $property));
+            }
+
+            $this->expectException(\Twig\Sandbox\SecurityNotAllowedPropertyError::class);
+            $policy->checkPropertyAllowed($account, 'hashed_password');
+        } finally {
+            $grav['config']->set('security.twig_content.config_access', $previous);
+        }
+    }
+
+    public static function providerConfigAccess(): array
+    {
+        return [[false], [true]];
+    }
+
+    public function testSandboxRender_ReadsNamedAccountFieldsOnly(): void
+    {
+        $account = new \Grav\Common\User\DataUser\User(['username' => 'admin', 'email' => 'admin@example.com', 'hashed_password' => 'secret']);
+        $env = $this->sandboxEnv([
+            'fields'    => "{{ account.username }} {{ account['email'] }}",
+            'method'    => "{{ account.offsetGet('hashed_password') }}",
+            'attribute' => "{{ attribute(account, 'offsetGet', ['hashed_password']) }}",
+            'key'       => "{{ account['hashed_password'] }}",
+            'get'       => "{{ account.get('hashed_password') }}",
+        ]);
+
+        self::assertSame('admin admin@example.com', $env->render('fields', ['account' => $account]));
+        foreach (['method', 'attribute', 'key', 'get'] as $name) {
+            try {
+                $output = $env->render($name, ['account' => $account]);
+                self::fail("Template '{$name}' must be blocked, rendered: {$output}");
+            } catch (SecurityError $e) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Media access: page-content Twig must be able to read media members under
+    // the sandbox. Regression for getgrav/grav#4105 — a modular page with
+    // `{{ page.media['x.png'].url }}` only worked with the sandbox disabled,
+    // because the allowlist row was keyed on a non-existent `MediumInterface`
+    // and matched no object. The row is now keyed on the concrete base class
+    // `Medium`, which every media type (ImageMedium, VideoMedium, AudioMedium,
+    // StaticImageMedium) extends.
+    // =========================================================================
+
+    public function testBuildPolicy_AllowsMediumMembers(): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $medium = new \Grav\Common\Page\Medium\Medium([]);
+
+        foreach (['url', 'html', 'metadata', 'thumbnail', '__tostring'] as $method) {
+            $this->assertDoesNotThrow(fn() => $policy->checkMethodAllowed($medium, $method));
+        }
+    }
+
+    public function testBuildPolicy_BlocksNonAllowlistedMediumMethod(): void
+    {
+        // The row is members-only: a medium method that is NOT on the list
+        // (here the Data mutator `set`) must still be blocked. The Data
+        // fallback row is stripped when config_access is off (the default),
+        // so it cannot rescue this either.
+        $policy = Security::buildTwigSandboxPolicy();
+        $medium = new \Grav\Common\Page\Medium\Medium([]);
+
+        $this->expectException(SecurityNotAllowedMethodError::class);
+        $policy->checkMethodAllowed($medium, 'set');
+    }
+
+    // =========================================================================
+    // Page accessors are getter and setter in one method, and the policy is asked
+    // about the name of a call only. The members that name a page's file or
+    // folder stay off the PageInterface row, so content can't change them.
+    // =========================================================================
+
+    /**
+     * @dataProvider pagePathSetterProvider
+     */
+    public function testBuildPolicy_BlocksPagePathSetters(string $method): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+
+        $this->expectException(SecurityNotAllowedMethodError::class);
+        $policy->checkMethodAllowed(new \Grav\Common\Page\Page(), $method);
+    }
+
+    public static function pagePathSetterProvider(): array
+    {
+        return [
+            'filepath' => ['filepath'],
+            'filePath' => ['filePath'],
+            'path'     => ['path'],
+            'folder'   => ['folder'],
+            'name'     => ['name'],
+        ];
+    }
+
+    /**
+     * @dataProvider pageRepointTemplateProvider
+     */
+    public function testSandboxRender_PageFileLocationCannotBeChanged(string $template): void
+    {
+        $file = tempnam(sys_get_temp_dir(), 'grav-sandbox-');
+        file_put_contents($file, 'CANARY');
+        $page = new \Grav\Common\Page\Page();
+        $env = $this->sandboxEnv(['hit' => $template]);
+
+        try {
+            $env->render('hit', ['page' => $page, 'file' => $file]);
+            self::fail('Page::filePath()/path() must not be callable from sandboxed content');
+        } catch (SecurityNotAllowedMethodError $e) {
+            self::assertNotSame($file, $page->filePath());
+            self::assertNotSame(dirname($file), $page->path());
+        } finally {
+            unlink($file);
+        }
+    }
+
+    public static function pageRepointTemplateProvider(): array
+    {
+        return [
+            'filepath + value(content)' => ["{% do page.filepath(file) %}{{ page.value('content') }}"],
+            'path + media'              => ["{% do page.path(file|split('/')|slice(0, -1)|join('/')) %}{{ page.media.all|keys|join(',') }}"],
+        ];
+    }
+
+    public function testBuildPolicy_AllowsPageMembers(): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $page = new \Grav\Common\Page\Page();
+
+        foreach (['title', 'route', 'url', 'content', 'value', 'media', 'find', 'collection'] as $method) {
+            $this->assertDoesNotThrow(fn() => $policy->checkMethodAllowed($page, $method));
+        }
+    }
+
+    // =========================================================================
+    // Plugin extension point: onBuildTwigSandboxPolicy lets a plugin allow its
+    // own safe Twig members for editor-authored content under the sandbox.
+    // =========================================================================
+
+    public function testBuildPolicy_PluginEventCanAllowCustomFunction(): void
+    {
+        $grav = \Grav\Common\Grav::instance();
+        $listener = static function ($event): void {
+            $functions = $event['functions'];
+            $functions[] = 'unite_gallery';
+            $event['functions'] = $functions;
+        };
+        $grav['events']->addListener('onBuildTwigSandboxPolicy', $listener);
+
+        try {
+            // setUp() cleared the memo, so this builds fresh and fires the event.
+            $policy = Security::buildTwigSandboxPolicy();
+            $this->assertDoesNotThrow(fn() => $policy->checkSecurity([], [], ['unite_gallery']));
+
+            // A function nobody registered is still blocked.
+            try {
+                $policy->checkSecurity([], [], ['some_unregistered_fn']);
+                self::fail('Unregistered function should still be blocked');
+            } catch (SecurityNotAllowedFunctionError $e) {
+                $this->addToAssertionCount(1);
+            }
+        } finally {
+            $grav['events']->removeListener('onBuildTwigSandboxPolicy', $listener);
+        }
+    }
+
+    public function testBuildPolicy_PluginEventCanAllowCustomMethod(): void
+    {
+        $grav = \Grav\Common\Grav::instance();
+        $listener = static function ($event): void {
+            // Same list-of-rows shape as security.yaml; merged into any
+            // existing row for the class.
+            $methods = $event['methods'];
+            $methods[] = ['class' => \Grav\Common\Page\Medium\Medium::class, 'methods' => 'reset'];
+            $event['methods'] = $methods;
+        };
+        $grav['events']->addListener('onBuildTwigSandboxPolicy', $listener);
+
+        try {
+            $policy = Security::buildTwigSandboxPolicy();
+            $medium = new \Grav\Common\Page\Medium\Medium([]);
+            $this->assertDoesNotThrow(fn() => $policy->checkMethodAllowed($medium, 'reset'));
+        } finally {
+            $grav['events']->removeListener('onBuildTwigSandboxPolicy', $listener);
+        }
+    }
+
+    // =========================================================================
+    // End-to-end render: SecurityError is raised when a disallowed primitive runs
+    // =========================================================================
+
+    public function testSandboxRender_BlocksConstantFunction(): void
+    {
+        $env = $this->sandboxEnv(['hit' => "{{ constant('PHP_VERSION') }}"]);
+        $this->expectException(SecurityNotAllowedFunctionError::class);
+        $env->render('hit');
+    }
+
+    public function testSandboxRender_BlocksEvaluateTwigFunction(): void
+    {
+        // Register a stub `evaluate_twig` so the parser knows the function exists;
+        // the sandbox should then reject it at render time.
+        $env = $this->sandboxEnv(['hit' => "{{ evaluate_twig('payload') }}"]);
+        $env->addFunction(new TwigFunction('evaluate_twig', static fn($x) => $x));
+
+        $this->expectException(SecurityNotAllowedFunctionError::class);
+        $env->render('hit');
+    }
+
+    public function testSandboxRender_BlocksReadFileFunction(): void
+    {
+        $env = $this->sandboxEnv(['hit' => "{{ read_file('/etc/passwd') }}"]);
+        $env->addFunction(new TwigFunction('read_file', static fn($p) => $p));
+
+        $this->expectException(SecurityNotAllowedFunctionError::class);
+        $env->render('hit');
+    }
+
+    public function testSandboxRender_BlocksSvgImageFunction(): void
+    {
+        $env = $this->sandboxEnv(['hit' => "{{ svg_image('user://accounts/admin.yaml') }}"]);
+        $env->addFunction(new TwigFunction('svg_image', static fn($p) => $p));
+
+        $this->expectException(SecurityNotAllowedFunctionError::class);
+        $env->render('hit');
+    }
+
+    public function testSandboxRender_AllowsUpperFilter(): void
+    {
+        $env = $this->sandboxEnv(['hit' => "{{ 'hello' | upper }}"]);
+        self::assertSame('HELLO', $env->render('hit'));
+    }
+
+    public function testSandboxRender_AllowsBasicControlFlow(): void
+    {
+        $env = $this->sandboxEnv(['hit' => "{% for i in 1..3 %}{{ i }}{% endfor %}"]);
+        self::assertSame('123', $env->render('hit'));
+    }
+
+    public function testSandboxRender_AllowsGuardTag(): void
+    {
+        $env = $this->sourcePolicySandboxEnv([
+            '@Page:hit' => "{% guard filter upper %}{{ 'a'|upper }}{% endguard %}"
+                . "{% guard function no_such_fn %}{{ no_such_fn() }}{% else %}b{% endguard %}",
+        ]);
+        self::assertSame('Ab', $env->render('@Page:hit'));
+    }
+
+    public function testSandboxRender_GuardBodyIsStillChecked(): void
+    {
+        // `constant` exists, so the guard keeps its body; the sandbox must
+        // still refuse the call inside it.
+        $env = $this->sourcePolicySandboxEnv([
+            '@Page:hit' => "{% guard function constant %}{{ constant('PHP_VERSION') }}{% endguard %}",
+        ]);
+        $this->expectException(SecurityNotAllowedFunctionError::class);
+        $env->render('@Page:hit');
+    }
+
+    // =========================================================================
+    // Runtime-constructed names: attribute() + concat can't be caught statically
+    // but the sandbox catches the resolved method call
+    // =========================================================================
+
+    public function testSandboxRender_BlocksAttributeMethodOnDisallowedClass(): void
+    {
+        // GHSA-p7gj / GHSA-v94j / GHSA-pm82 runtime-constructed method name pattern:
+        // attribute() resolves the method name from a variable at render time. The
+        // sandbox blocks the resolved access regardless — either as MethodError
+        // (if Twig compiles as method) or PropertyError (if compiled as property).
+        $env = $this->sandboxEnv([
+            'hit' => "{{ attribute(cfg, 'set', ['k', ['v']]) }}",
+        ]);
+
+        $cfg = new \Grav\Common\Config\Config([]);
+        $this->expectException(SecurityError::class);
+        $env->render('hit', ['cfg' => $cfg]);
+    }
+
+    // =========================================================================
+    // Config-shape tests
+    // =========================================================================
+
+    public function testBuildPolicy_PolicyIsCachedWithinRequest(): void
+    {
+        $p1 = Security::buildTwigSandboxPolicy();
+        $p2 = Security::buildTwigSandboxPolicy();
+        self::assertSame($p1, $p2, 'Policy should be cached by identity within a request');
+    }
+
+    // =========================================================================
+    // stdClass wildcard: page.header.<any_yaml_key> must pass the sandbox
+    // because frontmatter property sets are fully dynamic.
+    // =========================================================================
+
+    public function testSandboxRender_AllowsDynamicStdClassPropertyAccess(): void
+    {
+        $header = (object) ['title' => 'Hello', 'custom_key' => 'World'];
+        $env = $this->sandboxEnv([
+            'hit' => '{{ header.title }} / {{ header.custom_key }}',
+        ]);
+        self::assertSame('Hello / World', $env->render('hit', ['header' => $header]));
+    }
+
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+
+    // =========================================================================
+    // GHSA-j274-39qw-32c9 — `config.toArray()` plugin-secret exfiltration.
+    //
+    // The fix lives across three layers:
+    //  1. `toarray` is removed from the Config and Data sandbox allow-lists so
+    //     a real Config reachable via `grav['config']` cannot bulk-dump.
+    //  2. SandboxConfig replaces the injected `config` Twig variable inside
+    //     editor renders and filters denied dot-prefixes from get/value/
+    //     offsetGet/offsetExists/toArray.
+    //  3. `security.twig_sandbox.config_denied_paths` lists the prefixes
+    //     (defaults: plugins, streams, security, backups, scheduler).
+    //
+    // These tests cover (1) and (2). Layer (3) is exercised by config defaults
+    // in production — the unit tests in SandboxConfigTest assert the filtering
+    // logic itself.
+    // =========================================================================
+
+    public function testGhsaJ274_RawConfigToArrayBlockedBySandbox(): void
+    {
+        // After dropping `toarray` from Grav\Common\Config\Config and the
+        // parent Grav\Common\Data\Data allow-lists, the policy must reject
+        // toArray() on a real Config.
+        $policy = Security::buildTwigSandboxPolicy();
+        $config = new \Grav\Common\Config\Config([
+            'plugins' => ['email' => ['smtp' => ['password' => 'super-secret']]],
+        ]);
+        $this->expectException(SecurityNotAllowedMethodError::class);
+        $policy->checkMethodAllowed($config, 'toarray');
+    }
+
+    public function testGhsaJ274_RawDataToArrayBlockedBySandbox(): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $data = new \Grav\Common\Data\Data(['secret' => 'x']);
+        $this->expectException(SecurityNotAllowedMethodError::class);
+        $policy->checkMethodAllowed($data, 'toarray');
+    }
+
+    public function testGhsaJ274_SandboxConfigToArrayAllowed(): void
+    {
+        $policy = Security::buildTwigSandboxPolicy();
+        $facade = new \Grav\Common\Twig\Sandbox\SandboxConfig(
+            new \Grav\Common\Config\Config([]),
+            []
+        );
+        $this->assertDoesNotThrow(fn() => $policy->checkMethodAllowed($facade, 'toarray'));
+    }
+
+    public function testGhsaJ274_RenderViaSandboxConfigStripsPluginSecrets(): void
+    {
+        // Full advisory PoC: editor saves a page body of
+        //   {{ config.toArray()|json_encode }}
+        // With the SandboxConfig facade injected as `config`, the rendered
+        // output must NOT contain plugin secrets. (`raw` is no longer
+        // allow-listed; the escaped JSON still contains the substrings asserted
+        // below, so the stripping guarantee is unaffected.)
+        $real = new \Grav\Common\Config\Config([
+            'site' => ['title' => 'Public Title'],
+            'plugins' => [
+                'email' => ['smtp' => ['password' => 'PLUGIN_SECRET_42']],
+                'recaptcha' => ['secret_key' => 'RC_SECRET_99'],
+            ],
+            'streams' => ['schemes' => ['user' => 'user://']],
+        ]);
+        $facade = new \Grav\Common\Twig\Sandbox\SandboxConfig(
+            $real,
+            ['plugins', 'streams']
+        );
+
+        $env = $this->sandboxEnv(['poc' => '{{ config.toArray()|json_encode }}']);
+        $output = $env->render('poc', ['config' => $facade]);
+
+        self::assertStringContainsString('Public Title', $output, 'site.* must remain readable');
+        self::assertStringNotContainsString('PLUGIN_SECRET_42', $output, 'plugin secrets must be stripped');
+        self::assertStringNotContainsString('RC_SECRET_99', $output, 'plugin secrets must be stripped');
+        self::assertStringNotContainsString('user://', $output, 'streams.* must be stripped');
+    }
+
+    public function testGhsaJ274_RenderRawConfigToArrayRaisesSecurityError(): void
+    {
+        // Belt-and-suspenders: even if the SandboxConfig wiring is bypassed
+        // and a raw Config is passed as `config`, the policy must reject
+        // toArray() at render time (regression guard for layer 1 of the fix).
+        $real = new \Grav\Common\Config\Config([
+            'plugins' => ['email' => ['smtp' => ['password' => 'PLUGIN_SECRET_42']]],
+        ]);
+        // `raw` is no longer allow-listed, so keep the PoC to the method under
+        // test — toArray() must be rejected on its own.
+        $env = $this->sandboxEnv(['poc' => '{{ config.toArray()|json_encode }}']);
+        $this->expectException(SecurityNotAllowedMethodError::class);
+        $env->render('poc', ['config' => $real]);
+    }
+
+    public function testGhsaJ274_RenderConfigGetOnDeniedPathReturnsNull(): void
+    {
+        // Per-key reads through the facade must also be filtered.
+        $real = new \Grav\Common\Config\Config([
+            'plugins' => ['email' => ['smtp' => ['password' => 'PLUGIN_SECRET_42']]],
+            'site' => ['title' => 'Public Title'],
+        ]);
+        $facade = new \Grav\Common\Twig\Sandbox\SandboxConfig($real, ['plugins']);
+
+        $env = $this->sandboxEnv([
+            'denied' => "[{{ config.get('plugins.email.smtp.password', 'BLOCKED') }}]",
+            'allowed' => "[{{ config.get('site.title') }}]",
+        ]);
+        self::assertSame('[BLOCKED]', $env->render('denied', ['config' => $facade]));
+        self::assertSame('[Public Title]', $env->render('allowed', ['config' => $facade]));
+    }
+
+    // =========================================================================
+    //  GHSA-p597-crqc-m349 — the `system`/`site`/`theme` Twig variables are
+    //  plain arrays, so the sandbox policy cannot gate them at all: Twig
+    //  arbitrates method calls and property reads on objects, never key
+    //  access on an array. Twig::buildSandboxVars() therefore runs the three
+    //  through the same `config_denied_paths` filter as the `config` facade.
+    // =========================================================================
+
+    public function testGhsaP597_RawArrayVarIsNotGatedByThePolicy(): void
+    {
+        // Documents the mechanism the fix exists for: with the strictest
+        // possible policy, an unfiltered array still renders its secrets.
+        $env = $this->sandboxEnv(['poc' => '{{ system.cache.redis.password }}']);
+        $output = $env->render('poc', [
+            'system' => ['cache' => ['redis' => ['password' => 'REDIS_SECRET_7']]],
+        ]);
+        self::assertSame('REDIS_SECRET_7', $output);
+    }
+
+    public function testGhsaP597_FilteredSystemVarStripsSecretsAndKeepsTheRest(): void
+    {
+        $real = new \Grav\Common\Config\Config([
+            'system' => [
+                'absolute_urls' => false,
+                'cache' => ['driver' => 'redis', 'redis' => ['password' => 'REDIS_SECRET_7']],
+            ],
+            'site' => ['title' => 'Public Title', 'integrations' => ['api_key' => 'SITE_SECRET_9']],
+            'theme' => ['name' => 'quark'],
+        ]);
+        $filter = new \Grav\Common\Twig\Sandbox\SandboxConfig(
+            $real,
+            ['plugins', 'streams', 'security', 'system.cache.redis.password', 'site.integrations']
+        );
+
+        $env = $this->sandboxEnv([
+            'poc' => '{{ system.cache.redis.password }}|{{ system.cache.driver }}'
+                . '|{{ site.integrations.api_key }}|{{ site.title }}|{{ theme.name }}',
+        ]);
+        $output = $env->render('poc', [
+            'system' => $filter->get('system', []),
+            'site' => $filter->get('site', []),
+            'theme' => $filter->get('theme', []),
+        ]);
+
+        self::assertSame('|redis||Public Title|quark', $output);
+    }
+
+    public function testGhsaP597_DeniedTopLevelBlanksTheWholeVar(): void
+    {
+        // An operator who denies `system` outright gets an empty array in the
+        // sandboxed render rather than a partially filtered tree.
+        $real = new \Grav\Common\Config\Config([
+            'system' => ['cache' => ['redis' => ['password' => 'REDIS_SECRET_7']]],
+        ]);
+        $filter = new \Grav\Common\Twig\Sandbox\SandboxConfig($real, ['system']);
+
+        self::assertSame([], $filter->get('system', []));
+    }
+
+    /**
+     * theme_var(), header_var() and body_class() read the tree behind the
+     * `theme` variable by name, so a path redacted from the variable must not
+     * come back through them. A trusted theme template keeps the real value.
+     *
+     * @dataProvider themeConfigFunctionProvider
+     * @param string $template
+     * @param string $sandboxed
+     * @param string $trusted
+     */
+    public function testThemeConfigFunctionsHonorConfigDeniedPaths(string $template, string $sandboxed, string $trusted): void
+    {
+        $config = \Grav\Common\Grav::instance()['config'];
+        $prevTheme  = $config->get('theme');
+        $prevDenied = $config->get('security.twig_sandbox.config_denied_paths');
+
+        try {
+            $config->set('theme', ['maps_api_key' => 'THEME_SECRET_3', 'nested' => ['key' => 'THEME_SECRET_4', 'open' => 'yes'], 'accent' => 'blue']);
+            $config->set('security.twig_sandbox.config_denied_paths', ['theme.maps_api_key', 'theme.nested.key']);
+
+            $env = $this->sourcePolicySandboxEnv(['@Page:content' => $template, 'partials/base.html.twig' => $template]);
+            $vars = ['page' => new \Grav\Common\Page\Page()];
+
+            self::assertSame($sandboxed, $env->render('@Page:content', $vars));
+            self::assertSame($trusted, $env->render('partials/base.html.twig', $vars));
+        } finally {
+            $config->set('theme', $prevTheme);
+            $config->set('security.twig_sandbox.config_denied_paths', $prevDenied ?? []);
+        }
+    }
+
+    /**
+     * theme_var() walks page headers as plain data: a regular page's stdClass
+     * header and a Flex page's Header are read, any other object is skipped.
+     */
+    public function testThemeVarReadsPlainPageHeadersOnly(): void
+    {
+        $ext = new \Grav\Common\Twig\Extension\GravExtension();
+        $page = new class extends \Grav\Common\Page\Page {
+            public $stubHeader;
+            public function __construct()
+            {
+            }
+            public function header($var = null)
+            {
+                return $this->stubHeader;
+            }
+            public function exists()
+            {
+                return true;
+            }
+            public function root()
+            {
+                return false;
+            }
+            public function parent(?\Grav\Common\Page\Interfaces\PageInterface $var = null)
+            {
+                return null;
+            }
+        };
+
+        $page->stubHeader = (object) ['color' => 'red'];
+        self::assertSame('red', $ext->themeVarFunc([], 'color', null, $page));
+
+        $page->stubHeader = new \Grav\Common\Page\Header(['color' => 'green']);
+        self::assertSame('green', $ext->themeVarFunc([], 'color', null, $page));
+
+        $page->stubHeader = new class {
+            protected $color = 'blue';
+        };
+        self::assertSame('none', $ext->themeVarFunc([], "\0*\0color", 'none', $page));
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: string, 2: string}>
+     */
+    public static function themeConfigFunctionProvider(): array
+    {
+        return [
+            'theme_var'         => ["[{{ theme_var('maps_api_key') }}]", '[]', '[THEME_SECRET_3]'],
+            'theme_var default' => ["[{{ theme_var('maps_api_key', 'none') }}]", '[none]', '[THEME_SECRET_3]'],
+            'theme_var nested'  => ["[{{ theme_var('nested.key') }}]", '[]', '[THEME_SECRET_4]'],
+            'theme_var parent'  => ["[{{ theme_var('nested')|join(',') }}]", '[yes]', '[THEME_SECRET_4,yes]'],
+            'header_var'        => ["[{{ header_var('maps_api_key') }}]", '[]', '[THEME_SECRET_3]'],
+            'body_class'        => ["[{{ body_class(['maps_api_key', 'accent']) }}]", '[ accent]', '[ maps_api_key accent]'],
+            'not denied'        => ["[{{ theme_var('accent') }}]", '[blue]', '[blue]'],
+        ];
+    }
+
+    // =========================================================================
+    // Per-page process defaults wired through Security::pageProcessDefaults():
+    // when system.pages.process.twig is unset, the per-page twig flag inherits
+    // the security.twig_content.process_enabled gate so the admin UI and the
+    // runtime agree on whether Twig in content will render.
+    // =========================================================================
+
+    public function testPageProcessDefaults_TwigFallsBackToGateWhenUnset(): void
+    {
+        $grav = \Grav\Common\Grav::instance();
+        $config = $grav['config'];
+        $prevProcess = $config->get('system.pages.process');
+        $prevGate    = $config->get('security.twig_content.process_enabled');
+
+        try {
+            $config->set('system.pages.process', ['markdown' => true]);
+
+            $config->set('security.twig_content.process_enabled', false);
+            self::assertSame(['markdown' => true, 'twig' => false], Security::pageProcessDefaults());
+
+            $config->set('security.twig_content.process_enabled', true);
+            self::assertSame(['markdown' => true, 'twig' => true], Security::pageProcessDefaults());
+        } finally {
+            // Guard against leaking explicit null into Config: if prev was
+            // null (system.yaml not fully merged in this test bootstrap),
+            // restore to an empty array shape callers expect.
+            $config->set('system.pages.process', $prevProcess ?? []);
+            $config->set('security.twig_content.process_enabled', $prevGate);
+        }
+    }
+
+    public function testPageProcessDefaults_NullConfigStillHonorsGate(): void
+    {
+        // Fresh-install / minimal-config shape: system.pages.process is null.
+        // pageProcessDefaults must still produce a sane array with twig
+        // defaulted from the gate.
+        $grav = \Grav\Common\Grav::instance();
+        $config = $grav['config'];
+        $prevProcess = $config->get('system.pages.process');
+        $prevGate    = $config->get('security.twig_content.process_enabled');
+
+        try {
+            $config->set('system.pages.process', null);
+            $config->set('security.twig_content.process_enabled', true);
+            self::assertSame(['markdown' => true, 'twig' => true], Security::pageProcessDefaults());
+        } finally {
+            $config->set('system.pages.process', $prevProcess ?? []);
+            $config->set('security.twig_content.process_enabled', $prevGate);
+        }
+    }
+
+    public function testPageProcessDefaults_ExplicitTwigWinsOverGate(): void
+    {
+        $grav = \Grav\Common\Grav::instance();
+        $config = $grav['config'];
+        $prevProcess = $config->get('system.pages.process');
+        $prevGate    = $config->get('security.twig_content.process_enabled');
+
+        try {
+            // Operator explicitly sets twig: false even with the gate on —
+            // a deliberate site-wide opt-out that must be honored.
+            $config->set('system.pages.process', ['markdown' => true, 'twig' => false]);
+            $config->set('security.twig_content.process_enabled', true);
+            self::assertSame(['markdown' => true, 'twig' => false], Security::pageProcessDefaults());
+        } finally {
+            // Guard against leaking explicit null into Config: if prev was
+            // null (system.yaml not fully merged in this test bootstrap),
+            // restore to an empty array shape callers expect.
+            $config->set('system.pages.process', $prevProcess ?? []);
+            $config->set('security.twig_content.process_enabled', $prevGate);
+        }
+    }
+
+    /**
+     * Build a minimal sandboxed Twig environment preloaded with the current
+     * security policy. Templates is a name => source map.
+     */
+    private function sandboxEnv(array $templates): Environment
+    {
+        $env = new Environment(new ArrayLoader($templates), ['cache' => false, 'strict_variables' => false]);
+        $env->addExtension(new StringLoaderExtension());
+        $sandbox = new SandboxExtension(Security::buildTwigSandboxPolicy(), true); // sandboxed globally for test
+        $env->addExtension($sandbox);
+        return $env;
+    }
+
+    /**
+     * Production wiring: Grav never enables the sandbox globally. It registers a
+     * SandboxExtension whose GravSourcePolicy decides per template, so anything
+     * under `@Page:` / `@Var:` is sandboxed and a theme file on disk is not.
+     *
+     * Building the environment the way sandboxEnv() does — sandboxed globally —
+     * is what let a dead dump guard ship: it asked
+     * SandboxExtension::isSandboxed() with no Source, which is only ever true
+     * under a global sandbox, so it passed in tests and never fired in
+     * production. Use this helper for anything that asserts a runtime guard.
+     *
+     * @param array $templates
+     * @return Environment
+     */
+    private function sourcePolicySandboxEnv(array $templates): Environment
+    {
+        $env = new Environment(new ArrayLoader($templates), ['cache' => false, 'strict_variables' => false]);
+        $env->addExtension(new StringLoaderExtension());
+        $env->addExtension(new SandboxExtension(
+            Security::buildTwigSandboxPolicy(),
+            false,
+            new \Grav\Common\Twig\Sandbox\GravSourcePolicy()
+        ));
+        $env->addExtension(new \Grav\Common\Twig\Extension\GravExtension());
+
+        return $env;
+    }
+
+    /**
+     * The `array` cast converted the object itself — toArray(), or `(array)` for
+     * anything without it — so it never reached checkMethodAllowed(). `toarray` on a
+     * raw Config is deliberately off the allowlist, and `(array)` on the Grav
+     * container exposes Pimple's private $values, handing sandboxed content every
+     * resolved service including the un-redacted Config.
+     *
+     * (GHSA-59qm-58v5-gvc5)
+     *
+     * @dataProvider arrayCastProvider
+     * @param string $template
+     */
+    public function testGhsa59qm_ArrayCastOfNonAllowlistedObjectIsBlockedUnderSourcePolicy(string $template): void
+    {
+        $config = new \Grav\Common\Config\Config([
+            'plugins' => ['email' => ['smtp' => ['password' => 'PLUGIN_SECRET_42']]],
+        ]);
+
+        $env = $this->sourcePolicySandboxEnv(['@Var:poc' => $template]);
+
+        $this->expectException(SecurityError::class);
+        $env->render('@Var:poc', ['subject' => $config]);
+    }
+
+    /**
+     * @return array<string,array{0:string}>
+     */
+    public static function arrayCastProvider(): array
+    {
+        return [
+            'filter form' => ['{{ subject|array|json_encode }}'],
+            'function form' => ['{{ array(subject)|json_encode }}'],
+            'piped to yaml' => ['{{ subject|array|yaml }}'],
+        ];
+    }
+
+    /**
+     * The redacting facade is what sandboxed content is supposed to reach, and
+     * `toarray` is allow-listed on it, so the guard must leave it alone. If this
+     * fails, the GHSA-59qm fix has over-reached and broken legitimate content.
+     */
+    public function testGhsa59qm_ArrayCastOfSandboxConfigFacadeStillWorks(): void
+    {
+        $facade = new \Grav\Common\Twig\Sandbox\SandboxConfig(
+            new \Grav\Common\Config\Config([
+                'site' => ['title' => 'Grav'],
+                'plugins' => ['email' => ['smtp' => ['password' => 'PLUGIN_SECRET_42']]],
+            ]),
+            ['plugins']
+        );
+
+        $env = $this->sourcePolicySandboxEnv(['@Var:ok' => '{{ (subject|array)["site"]["title"] }}']);
+
+        self::assertSame('Grav', $env->render('@Var:ok', ['subject' => $facade]));
+    }
+
+    /**
+     * Plain values and stdClass must still cast, or the guard breaks ordinary
+     * page content that uses `|array` on a list or a page header.
+     */
+    public function testGhsa59qm_ArrayCastOfPlainValuesStillWorks(): void
+    {
+        $env = $this->sourcePolicySandboxEnv([
+            '@Var:list' => '{{ (subject|array)|join(",") }}',
+        ]);
+
+        self::assertSame('a,b', $env->render('@Var:list', ['subject' => ['a', 'b']]));
+
+        $obj = new \stdClass();
+        $obj->title = 'Hello';
+        $env2 = $this->sourcePolicySandboxEnv(['@Var:obj' => '{{ (subject|array)["title"] }}']);
+
+        self::assertSame('Hello', $env2->render('@Var:obj', ['subject' => $obj]));
+    }
+
+    /**
+     * `array_key_value(key, val, object)` only ever extends a real array. Given an
+     * object it returns a new array and leaves the object alone, since writing
+     * into it would be an offsetSet() call the policy never checks.
+     */
+    public function testArrayKeyValueDoesNotWriteIntoObjectsUnderSourcePolicy(): void
+    {
+        $assets = new \Grav\Common\Assets();
+        $collections = $assets->getCollections();
+
+        $env = $this->sourcePolicySandboxEnv([
+            '@Page:extend' => '{{ array_key_value("collections", {"a": {"/user/data/example.css": {"loading": "inline"}}}, assets)|keys|join(",") }}',
+        ]);
+
+        self::assertSame('collections', $env->render('@Page:extend', ['assets' => $assets]));
+        self::assertSame($collections, $assets->getCollections());
+    }
+
+    /**
+     * The documented use, building an associative array one key at a time.
+     */
+    public function testArrayKeyValueStillBuildsArraysUnderSourcePolicy(): void
+    {
+        $env = $this->sourcePolicySandboxEnv([
+            '@Page:ok' => '{{ array_key_value("b", 2, array_key_value("a", 1))|json_encode }}',
+        ]);
+
+        self::assertSame('{"a":1,"b":2}', html_entity_decode($env->render('@Page:ok')));
+    }
+
+    /**
+     * print_r reflects private state, so it walked straight through the redacting
+     * SandboxConfig facade and returned the whole config tree — the exact leak
+     * GHSA-mc5q-6hpj-rp7j was supposed to close, and did not. Assert it through the
+     * source policy, which is how Grav actually renders content.
+     */
+    public function testGhsaRfr9_ReflectiveDumpOfConfigFacadeIsBlockedUnderSourcePolicy(): void
+    {
+        $facade = new \Grav\Common\Twig\Sandbox\SandboxConfig(
+            new \Grav\Common\Config\Config(['plugins' => ['email' => ['smtp' => ['password' => 'PLUGIN_SECRET_42']]]]),
+            ['plugins']
+        );
+
+        $env = $this->sourcePolicySandboxEnv(['@Var:poc' => '{{ config|print_r }}']);
+
+        $this->expectException(SecurityNotAllowedFilterError::class);
+        $env->render('@Var:poc', ['config' => $facade]);
+    }
+
+    /**
+     * The serializing half of the same guard: a raw Config is not an allow-listed
+     * class, so json_encode / yaml_encode / string must refuse it under the
+     * source policy too.
+     *
+     * @dataProvider serializingDumpFilterProvider
+     * @param string $template
+     */
+    public function testGhsaRfr9_SerializingDumpOfRawConfigIsBlockedUnderSourcePolicy(string $template): void
+    {
+        $real = new \Grav\Common\Config\Config([
+            'plugins' => ['email' => ['smtp' => ['password' => 'PLUGIN_SECRET_42']]],
+        ]);
+
+        $env = $this->sourcePolicySandboxEnv(['@Var:poc' => $template]);
+
+        $this->expectException(SecurityNotAllowedFilterError::class);
+        $env->render('@Var:poc', ['config' => $real]);
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function serializingDumpFilterProvider(): array
+    {
+        return [
+            'json_encode' => ['{{ config|json_encode }}'],
+            'yaml_encode' => ['{{ config|yaml_encode }}'],
+            'string'      => ['{{ config|string }}'],
+            // The function form must take the same guarded path as the filter.
+            // An object inside an array reaches json_encode(), which calls
+            // jsonSerialize() without asking the sandbox.
+            'string function'                => ['{{ string(config) }}'],
+            'string function, array wrapped' => ['{{ string([config]) }}'],
+            'string function, hash wrapped'  => ['{{ string({a: config}) }}'],
+        ];
+    }
+
+    /**
+     * Guarding the `string` function must not break it on plain values in
+     * sandboxed content.
+     */
+    public function testSandboxRender_StringFunctionStillCastsPlainValues(): void
+    {
+        $env = $this->sourcePolicySandboxEnv([
+            '@Var:ok' => '{{ string(true) }}|{{ string(42) }}|{{ string(["a", "b"]) }}|{{ string(subject) }}',
+        ]);
+
+        $obj = new \stdClass();
+        $obj->title = 'Hello';
+
+        self::assertSame('1|42|["a","b"]|[{"title":"Hello"}]', html_entity_decode($env->render('@Var:ok', ['subject' => [$obj]])));
+    }
+
+    /**
+     * The dump guard walks the properties of a stdClass (a page header) the way
+     * it walks arrays, so an object kept inside one gets the same check.
+     *
+     * @dataProvider serializingDumpFilterProvider
+     * @param string $template
+     */
+    public function testSerializingDumpOfHeaderHoldingDataObjectIsBlockedUnderSourcePolicy(string $template): void
+    {
+        $header = (object) [
+            'title' => 'Page',
+            'login' => ['parent_acl' => false],
+            'login.merged' => new \Grav\Common\Data\Data(['site_host' => 'example.com']),
+        ];
+
+        $env = $this->sourcePolicySandboxEnv(['@Var:header' => $template]);
+
+        $this->expectException(SecurityNotAllowedFilterError::class);
+        $env->render('@Var:header', ['config' => $header]);
+    }
+
+    /**
+     * A header that really is YAML data (scalars, arrays, nested stdClass) must
+     * still dump, or `{{ page.header|json_encode }}` breaks for every page.
+     */
+    public function testSerializingDumpOfPlainHeaderStillWorksUnderSourcePolicy(): void
+    {
+        $header = (object) [
+            'title' => 'Page',
+            'taxonomy' => ['tag' => ['a', 'b']],
+            'nested' => (object) ['deep' => (object) ['ok' => true]],
+        ];
+
+        $env = $this->sourcePolicySandboxEnv(['@Var:ok' => '{{ config|json_encode }}']);
+
+        self::assertSame(json_encode($header), html_entity_decode($env->render('@Var:ok', ['config' => $header])));
+    }
+
+    /**
+     * Sandboxed content keeps output escaping on: the `autoescape` tag is not
+     * available there, as the `raw` filter is not. Trusted templates keep it.
+     */
+    public function testAutoescapeTagIsNotAllowedUnderSourcePolicy(): void
+    {
+        $template = '{% autoescape false %}{{ markup }}{% endautoescape %}';
+        $env = $this->sourcePolicySandboxEnv(['@Page:content' => $template, 'partials/base.html.twig' => $template]);
+
+        self::assertSame('<b>x</b>', $env->render('partials/base.html.twig', ['markup' => '<b>x</b>']));
+
+        $this->expectException(SecurityNotAllowedTagError::class);
+        $env->render('@Page:content', ['markup' => '<b>x</b>']);
+    }
+
+    /**
+     * `sort_by_key` reads `row[key]` from every row. In sandboxed content an
+     * object row must pass the same property check as `row[key]` in a template;
+     * arrays of arrays and trusted templates sort as before.
+     */
+    public function testSortByKeyChecksObjectRowsUnderSourcePolicy(): void
+    {
+        $real = new \Grav\Common\Config\Config(['plugins' => ['x' => 'b']]);
+        $env = $this->sourcePolicySandboxEnv([
+            '@Var:rows' => "{{ [{'plugins.x': 'a'}, config]|sort_by_key('plugins.x')|length }}",
+            '@Var:arrays' => "{{ [{'k': 'b'}, {'k': 'a'}]|sort_by_key('k')|column('k')|join(',') }}",
+            'partials/base.html.twig' => "{{ [{'plugins.x': 'a'}, config]|sort_by_key('plugins.x')|length }}",
+        ]);
+
+        self::assertSame('a,b', $env->render('@Var:arrays'));
+        self::assertSame('2', $env->render('partials/base.html.twig', ['config' => $real]));
+
+        $this->expectException(\Twig\Sandbox\SecurityNotAllowedPropertyError::class);
+        $env->render('@Var:rows', ['config' => $real]);
+    }
+
+    /**
+     * The same guard must not fire on a trusted (unsandboxed) source, or every
+     * theme partial that dumps an object breaks — the regression behind #4175.
+     */
+    public function testGhsaRfr9_TrustedSourceStillDumpsObjects(): void
+    {
+        $real = new \Grav\Common\Config\Config([
+            'plugins' => ['email' => ['smtp' => ['password' => 'PLUGIN_SECRET_42']]],
+        ]);
+        $facade = new \Grav\Common\Twig\Sandbox\SandboxConfig($real, ['plugins']);
+
+        $env = $this->sourcePolicySandboxEnv(['partials/base.html.twig' => '{{ config|print_r }}']);
+        $output = $env->render('partials/base.html.twig', ['config' => $facade]);
+
+        self::assertStringContainsString('PLUGIN_SECRET_42', $output);
+    }
+
+    private function assertDoesNotThrow(callable $fn): void
+    {
+        try {
+            $fn();
+        } catch (\Throwable $t) {
+            self::fail('Expected no exception, got ' . $t::class . ': ' . $t->getMessage());
+        }
+        $this->addToAssertionCount(1);
+    }
+
+    // =========================================================================
+    // GHSA-gh8j-q67c-j53f: which template sources the sandbox applies to
+    // =========================================================================
+
+    /**
+     * The Email plugin renders a form's `process.email.*` parameters as
+     * `@EmailVar:` templates. Those parameters are page front matter, so they
+     * are editor-authored and must be sandboxed like any other content Twig.
+     */
+    public function testSourcePolicy_SandboxesEmailVarSources(): void
+    {
+        $policy = new \Grav\Common\Twig\Sandbox\GravSourcePolicy();
+
+        self::assertTrue($policy->enableSandbox(new \Twig\Source('', '@EmailVar:abc123')));
+    }
+
+    /**
+     * The editor-authored sources, for completeness alongside the above.
+     */
+    public function testSourcePolicy_SandboxesPageAndVarSources(): void
+    {
+        $policy = new \Grav\Common\Twig\Sandbox\GravSourcePolicy();
+
+        self::assertTrue($policy->enableSandbox(new \Twig\Source('', '@Page:/home')));
+        self::assertTrue($policy->enableSandbox(new \Twig\Source('', '@Var:{{ x }}')));
+    }
+
+    /**
+     * Trusted templates on disk are never '@'-prefixed and stay unsandboxed
+     * when Grav renders them. One that editor content `{% include %}`s is
+     * covered by TwigEnvironment::render(), see SourceSandboxCompilationTest.
+     */
+    public function testSourcePolicy_LeavesDiskTemplatesUnsandboxed(): void
+    {
+        $policy = new \Grav\Common\Twig\Sandbox\GravSourcePolicy();
+
+        self::assertFalse($policy->enableSandbox(new \Twig\Source('', 'partials/base.html.twig')));
+        self::assertFalse($policy->enableSandbox(new \Twig\Source('', '')));
+        self::assertFalse($policy->enableSandbox(new \Twig\Source('', '@Other:thing')));
+    }
+}

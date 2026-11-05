@@ -1,35 +1,48 @@
 <?php
-namespace Grav\Common;
-
-use Grav\Common\Data\Data;
-use Grav\Common\Page\Page;
-use Grav\Common\Config\Config;
-use RocketTheme\Toolbox\Event\EventDispatcher;
-use RocketTheme\Toolbox\Event\EventSubscriberInterface;
 
 /**
- * The Plugin object just holds the id and path to a plugin.
+ * @package    Grav\Common
  *
- * @author RocketTheme
- * @license MIT
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
  */
-class Plugin implements EventSubscriberInterface
+
+namespace Grav\Common;
+
+use ArrayAccess;
+use Composer\Autoload\ClassLoader;
+use Grav\Common\Data\Blueprint;
+use Grav\Common\Data\Data;
+use Grav\Common\Page\Interfaces\PageInterface;
+use Grav\Common\Config\Config;
+use LogicException;
+use RocketTheme\Toolbox\File\YamlFile;
+use RocketTheme\Toolbox\ResourceLocator\UniformResourceLocator;
+use Symfony\Component\EventDispatcher\EventDispatcher;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+use function defined;
+use function is_bool;
+use function is_string;
+
+/**
+ * Class Plugin
+ * @package Grav\Common
+ */
+class Plugin implements EventSubscriberInterface, ArrayAccess
 {
-    /**
-     * @var Grav
-     */
+    /** @var array */
+    public $features = [];
+
+    /** @var Grav */
     protected $grav;
-
-    /**
-     * @var Config
-     */
+    /** @var Config|null */
     protected $config;
-
+    /** @var bool */
     protected $active = true;
-    /**
-     * @var \Grav\Common\string
-     */
-    protected $name;
+    /** @var Blueprint|null */
+    protected $blueprint;
+    /** @var ClassLoader|null */
+    protected $loader;
 
     /**
      * By default assign all methods as listeners using the default priority.
@@ -38,11 +51,11 @@ class Plugin implements EventSubscriberInterface
      */
     public static function getSubscribedEvents()
     {
-        $methods = get_class_methods(get_called_class());
+        $methods = get_class_methods(static::class);
 
-        $list = array();
+        $list = [];
         foreach ($methods as $method) {
-            if (strpos($method, 'on') === 0) {
+            if (str_starts_with($method, 'on')) {
                 $list[$method] = [$method, 0];
             }
         }
@@ -53,27 +66,105 @@ class Plugin implements EventSubscriberInterface
     /**
      * Constructor.
      *
-     * @param string              $name
-     * @param Grav                $grav
-     * @param Config              $config
+     * @param string $name
+     * @param Grav   $grav
+     * @param Config|null $config
      */
-    public function __construct($name, Grav $grav, Config $config)
+    public function __construct(public $name, Grav $grav, ?Config $config = null)
     {
         $this->grav = $grav;
-        $this->config = $config;
-        $this->name = $name;
+
+        if ($config) {
+            $this->setConfig($config);
+        }
     }
 
+    /**
+     * @return ClassLoader|null
+     * @internal
+     */
+    final public function getAutoloader(): ?ClassLoader
+    {
+        return $this->loader;
+    }
+
+    /**
+     * @param ClassLoader|null $loader
+     * @internal
+     */
+    final public function setAutoloader(?ClassLoader $loader): void
+    {
+        $this->loader = $loader;
+    }
+
+    /**
+     * @param Config $config
+     * @return $this
+     */
+    public function setConfig(Config $config)
+    {
+        $this->config = $config;
+
+        return $this;
+    }
+
+    /**
+     * Get configuration of the plugin.
+     *
+     * @return array
+     */
+    public function config()
+    {
+        return $this->config["plugins.{$this->name}"] ?? [];
+    }
+
+    /**
+     * Determine if plugin is running under the admin
+     *
+     * @return bool
+     */
     public function isAdmin()
     {
-        if (isset($this->grav['admin'])) {
-            return true;
+        return Utils::isAdminPlugin();
+    }
+
+    /**
+     * Determine if plugin is running under the CLI
+     *
+     * @return bool
+     */
+    public function isCli()
+    {
+        return defined('GRAV_CLI');
+    }
+
+    /**
+     * Determine if this route is in Admin and active for the plugin
+     *
+     * @param string $plugin_route
+     * @return bool
+     */
+    protected function isPluginActiveAdmin($plugin_route)
+    {
+        $active = false;
+
+        /** @var Uri $uri */
+        $uri = $this->grav['uri'];
+        /** @var Config $config */
+        $config = $this->config ?? $this->grav['config'];
+
+        if (!str_contains($uri->path(), $config->get('plugins.admin.route') . '/' . $plugin_route)) {
+            $active = false;
+        } elseif (isset($uri->paths()[1]) && $uri->paths()[1] === $plugin_route) {
+            $active = true;
         }
-        return false;
+
+        return $active;
     }
 
     /**
      * @param array $events
+     * @return void
      */
     protected function enable(array $events)
     {
@@ -82,19 +173,32 @@ class Plugin implements EventSubscriberInterface
 
         foreach ($events as $eventName => $params) {
             if (is_string($params)) {
-                $dispatcher->addListener($eventName, array($this, $params));
+                $dispatcher->addListener($eventName, [$this, $params]);
             } elseif (is_string($params[0])) {
-                $dispatcher->addListener($eventName, array($this, $params[0]), isset($params[1]) ? $params[1] : 0);
+                $dispatcher->addListener($eventName, [$this, $params[0]], $this->getPriority($params, $eventName));
             } else {
                 foreach ($params as $listener) {
-                    $dispatcher->addListener($eventName, array($this, $listener[0]), isset($listener[1]) ? $listener[1] : 0);
+                    $dispatcher->addListener($eventName, [$this, $listener[0]], $this->getPriority($listener, $eventName));
                 }
             }
         }
     }
 
     /**
+     * @param array  $params
+     * @param string $eventName
+     * @return int
+     */
+    private function getPriority($params, $eventName)
+    {
+        $override = implode('.', ['priorities', $this->name, $eventName, $params[0]]);
+
+        return $this->grav['config']->get($override) ?? $params[1] ?? 0;
+    }
+
+    /**
      * @param array $events
+     * @return void
      */
     protected function disable(array $events)
     {
@@ -103,15 +207,89 @@ class Plugin implements EventSubscriberInterface
 
         foreach ($events as $eventName => $params) {
             if (is_string($params)) {
-                $dispatcher->removeListener($eventName, array($this, $params));
+                $dispatcher->removeListener($eventName, [$this, $params]);
             } elseif (is_string($params[0])) {
-                $dispatcher->removeListener($eventName, array($this, $params[0]));
+                $dispatcher->removeListener($eventName, [$this, $params[0]]);
             } else {
                 foreach ($params as $listener) {
-                    $dispatcher->removeListener($eventName, array($this, $listener[0]));
+                    $dispatcher->removeListener($eventName, [$this, $listener[0]]);
                 }
             }
         }
+    }
+
+    /**
+     * Whether or not an offset exists.
+     *
+     * @param string $offset  An offset to check for.
+     * @return bool          Returns TRUE on success or FALSE on failure.
+     */
+    #[\ReturnTypeWillChange]
+    public function offsetExists($offset)
+    {
+        if ($offset === 'title') {
+            $offset = 'name';
+        }
+
+        $blueprint = $this->getBlueprint();
+
+        return isset($blueprint[$offset]);
+    }
+
+    /**
+     * Returns the value at specified offset.
+     *
+     * @param string $offset  The offset to retrieve.
+     * @return mixed         Can return all value types.
+     */
+    #[\ReturnTypeWillChange]
+    public function offsetGet($offset)
+    {
+        if ($offset === 'title') {
+            $offset = 'name';
+        }
+
+        $blueprint = $this->getBlueprint();
+
+        return $blueprint[$offset] ?? null;
+    }
+
+    /**
+     * Assigns a value to the specified offset.
+     *
+     * @param string $offset  The offset to assign the value to.
+     * @param mixed $value   The value to set.
+     * @throws LogicException
+     */
+    #[\ReturnTypeWillChange]
+    public function offsetSet($offset, mixed $value)
+    {
+        throw new LogicException(self::class . ' blueprints cannot be modified.');
+    }
+
+    /**
+     * Unsets an offset.
+     *
+     * @param string $offset  The offset to unset.
+     * @throws LogicException
+     */
+    #[\ReturnTypeWillChange]
+    public function offsetUnset($offset)
+    {
+        throw new LogicException(self::class . ' blueprints cannot be modified.');
+    }
+
+    /**
+     * @return array
+     */
+    public function __debugInfo(): array
+    {
+        $array = (array)$this;
+
+        unset($array["\0*\0grav"]);
+        $array["\0*\0config"] = $this->config();
+
+        return $array;
     }
 
     /**
@@ -121,65 +299,171 @@ class Plugin implements EventSubscriberInterface
      *
      * format: [plugin:myplugin_name](function_data)
      *
-     * @param        $content           The string to perform operations upon
-     * @param        $function          The anonymous callback function
-     * @param string $internal_regex    Optional internal regex to extra data from
-     *
+     * @param string   $content        The string to perform operations upon
+     * @param callable $function       The anonymous callback function
+     * @param string   $internal_regex Optional internal regex to extra data from
      * @return string
      */
     protected function parseLinks($content, $function, $internal_regex = '(.*)')
     {
-        $regex = '/\[plugin:(?:'.$this->name.')\]\('.$internal_regex.'\)/i';
-        return preg_replace_callback($regex, $function, $content);
+        $regex = '/\[plugin:(?:' . preg_quote($this->name, '/') . ')\]\(' . $internal_regex . '\)/i';
+
+        $result = preg_replace_callback($regex, $function, $content);
+        \assert($result !== null);
+
+        return $result;
     }
 
     /**
      * Merge global and page configurations.
      *
-     * @param Page  $page    The page to merge the configurations with the
+     * @param PageInterface $page The page to merge the configurations with the
      *                       plugin settings.
-     * @param bool  $deep    Should you use deep or shallow merging
-     * @param array $params  Array of additional configuration options to
+     * @param mixed $deep false = shallow|true = recursive|merge = recursive+unique
+     * @param array $params Array of additional configuration options to
      *                       merge with the plugin settings.
-     *
-     * @return \Grav\Common\Data\Data
+     * @param string $type Is this 'plugins' or 'themes'
+     * @return Data
      */
-    protected function mergeConfig(Page $page, $deep = false, $params = [])
+    protected function mergeConfig(PageInterface $page, mixed $deep = false, $params = [], $type = 'plugins')
     {
+        /** @var Config $config */
+        $config = $this->config ?? $this->grav['config'];
+
         $class_name = $this->name;
-        $class_name_merged = $class_name . '.merged';
-        $defaults = $this->config->get('plugins.'. $class_name, []);
+        $defaults = $config->get($type . '.' . $class_name, []);
+        // A plugin that stores what this method returns back in the config
+        // (`$config->set('plugins.x', $this->mergeConfig($page))`) gets that
+        // Data object back as its defaults the next time it is called.
+        if ($defaults instanceof Data) {
+            $defaults = $defaults->toArray();
+        }
         $page_header = $page->header();
         $header = [];
-        if (!isset($page_header->$class_name_merged) && isset($page_header->$class_name)) {
+
+        // The result carries the plugin's whole configuration, so it is never
+        // cached in the page header: the header is visible to whoever can read
+        // the page (sandboxed page Twig, the page API), the configuration is not.
+        if (isset($page_header->{$class_name})) {
             // Get default plugin configurations and retrieve page header configuration
-            $config = $page_header->$class_name;
+            $config = $page_header->{$class_name};
             if (is_bool($config)) {
                 // Overwrite enabled option with boolean value in page header
                 $config = ['enabled' => $config];
             }
             // Merge page header settings using deep or shallow merging technique
-            if ($deep) {
-                $header = array_replace_recursive($defaults, $config);
-            } else {
-                $header = array_merge($defaults, $config);
-            }
-            // Create new config object and set it on the page object so it's cached for next time
-            $page->modifyHeader($class_name_merged, new Data($header));
-        } else if (isset($page_header->$class_name_merged)) {
-            $merged = $page_header->$class_name_merged;
-            $header = $merged->toArray();
+            $header = $this->mergeArrays($deep, $defaults, $config);
         }
         if (empty($header)) {
             $header = $defaults;
         }
         // Merge additional parameter with configuration options
-        if ($deep) {
-            $header = array_replace_recursive($header, $params);
-        } else {
-            $header = array_merge($header, $params);
-        }
+        $header = $this->mergeArrays($deep, $header, $params);
+
         // Return configurations as a new data config class
         return new Data($header);
+    }
+
+    /**
+     * Merge arrays based on deepness
+     *
+     * @param string|bool $deep
+     * @param array $array1
+     * @param array $array2
+     * @return array
+     */
+    private function mergeArrays($deep, $array1, $array2)
+    {
+        if ($deep === 'merge') {
+            return Utils::arrayMergeRecursiveUnique($array1, $array2);
+        }
+        if ($deep === true) {
+            return array_replace_recursive($array1, $array2);
+        }
+
+        return array_merge($array1, $array2);
+    }
+
+    /**
+     * Persists to disk the plugin parameters currently stored in the Grav Config object
+     *
+     * @param string $name The name of the plugin whose config it should store.
+     * @return bool
+     */
+    public static function saveConfig($name)
+    {
+        if (!$name) {
+            return false;
+        }
+
+        $grav = Grav::instance();
+
+        /** @var UniformResourceLocator $locator */
+        $locator = $grav['locator'];
+
+        $filename = 'config://plugins/' . $name . '.yaml';
+        $file = YamlFile::instance((string)$locator->findResource($filename, true, true));
+        $content = $grav['config']->get('plugins.' . $name);
+        $file->save($content);
+        $file->free();
+        unset($file);
+
+        return true;
+    }
+
+    public static function inheritedConfigOption(string $plugin, string $var, ?PageInterface $page = null, $default = null)
+    {
+        if (Utils::isAdminPlugin()) {
+            $page = Grav::instance()['admin']->page() ?? null;
+        } else {
+            $page ??= Grav::instance()['page'] ?? null;
+        }
+
+        // Try to find var in the page headers
+        if ($page instanceof PageInterface && $page->exists()) {
+            // Loop over pages and look for header vars
+            while ($page && !$page->root()) {
+                $header = new Data((array)$page->header());
+                $value = $header->get("$plugin.$var");
+                if (isset($value)) {
+                    return $value;
+                }
+                $page = $page->parent();
+            }
+        }
+
+        return Grav::instance()['config']->get("plugins.$plugin.$var", $default);
+    }
+
+    /**
+     * Simpler getter for the plugin blueprint
+     *
+     * @return Blueprint
+     */
+    public function getBlueprint()
+    {
+        if (null === $this->blueprint) {
+            $this->loadBlueprint();
+            \assert($this->blueprint instanceof Blueprint);
+        }
+
+        return $this->blueprint;
+    }
+
+    /**
+     * Load blueprints.
+     *
+     * @return void
+     */
+    protected function loadBlueprint()
+    {
+        if (null === $this->blueprint) {
+            $grav = Grav::instance();
+            /** @var Plugins $plugins */
+            $plugins = $grav['plugins'];
+            $data = $plugins->get($this->name);
+            \assert($data !== null);
+            $this->blueprint = $data->blueprints();
+        }
     }
 }

@@ -1,5 +1,15 @@
 <?php
+
+/**
+ * @package    Grav\Common\GPM
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common\GPM\Local;
+
+use Grav\Common\Grav;
 
 /**
  * Class Plugins
@@ -7,9 +17,7 @@ namespace Grav\Common\GPM\Local;
  */
 class Plugins extends AbstractPackageCollection
 {
-    /**
-     * @var string
-     */
+    /** @var string */
     protected $type = 'plugins';
 
     /**
@@ -17,6 +25,9 @@ class Plugins extends AbstractPackageCollection
      */
     public function __construct()
     {
-        parent::__construct(self::getGrav()['plugins']->all());
+        /** @var \Grav\Common\Plugins $plugins */
+        $plugins = Grav::instance()['plugins'];
+
+        parent::__construct($plugins->all());
     }
 }

@@ -1,32 +1,45 @@
 <?php
+
+/**
+ * @package    Grav\Common\GPM
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common\GPM;
 
+use Grav\Common\GPM\Remote\GravCore;
+use InvalidArgumentException;
+
+/**
+ * Class Upgrader
+ *
+ * @package Grav\Common\GPM
+ */
 class Upgrader
 {
-    /**
-     * Remote details about latest Grav version
-     * @var Packages
-     */
+    /** @var GravCore Remote details about latest Grav version */
     private $remote;
 
-    /**
-     * Internal cache
-     * @var Iterator
-     */
-    protected $cache;
+    /** @var string|null */
+    private $min_php;
 
     /**
      * Creates a new GPM instance with Local and Remote packages available
+     *
      * @param boolean  $refresh  Applies to Remote Packages only and forces a refetch of data
-     * @param callable $callback Either a function or callback in array notation
+     * @param callable|null $callback Either a function or callback in array notation
+     * @throws InvalidArgumentException
      */
     public function __construct($refresh = false, $callback = null)
     {
-        $this->remote = new Remote\Grav($refresh, $callback);
+        $this->remote = new Remote\GravCore($refresh, $callback);
     }
 
     /**
      * Returns the release date of the latest version of Grav
+     *
      * @return string
      */
     public function getReleaseDate()
@@ -36,6 +49,7 @@ class Upgrader
 
     /**
      * Returns the version of the installed Grav
+     *
      * @return string
      */
     public function getLocalVersion()
@@ -45,6 +59,7 @@ class Upgrader
 
     /**
      * Returns the version of the remotely available Grav
+     *
      * @return string
      */
     public function getRemoteVersion()
@@ -54,6 +69,7 @@ class Upgrader
 
     /**
      * Returns an array of assets available to download remotely
+     *
      * @return array
      */
     public function getAssets()
@@ -63,8 +79,8 @@ class Upgrader
 
     /**
      * Returns the changelog list for each version of Grav
-     * @param string $diff the version number to start the diff from
      *
+     * @param string|null $diff the version number to start the diff from
      * @return array return the changelog list for each version
      */
     public function getChangelog($diff = null)
@@ -73,19 +89,128 @@ class Upgrader
     }
 
     /**
-     * Checks if the currently installed Grav is upgradable to a newer version
-     * @return boolean True if it's upgradable, False otherwise.
+     * Make sure this meets minimum PHP requirements
+     *
+     * @return bool
+     */
+    public function meetsRequirements()
+    {
+        if (version_compare(PHP_VERSION, $this->minPHPVersion(), '<')) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Get minimum PHP version from remote
+     *
+     * @return string
+     */
+    public function minPHPVersion()
+    {
+        if (null === $this->min_php) {
+            $this->min_php = $this->remote->getMinPHPVersion();
+        }
+
+        return $this->min_php;
+    }
+
+    /**
+     * Checks if the currently installed Grav is upgradable to a newer version.
+     *
+     * Returns false when the remote version is from a different release family
+     * (e.g. local is 1.8.x and remote is 2.0.x), so that installs are never
+     * silently jumped across a major boundary. See family() for what a family is.
+     *
+     * @return bool True if it's upgradable within the same release family.
      */
     public function isUpgradable()
     {
-        return version_compare($this->getLocalVersion(), $this->getRemoteVersion(), "<");
+        if ($this->isCrossFamilyUpgrade()) {
+            return false;
+        }
+
+        return version_compare($this->getLocalVersion(), $this->getRemoteVersion(), '<');
+    }
+
+    /**
+     * Returns true when the remote has advertised a newer major via the `next_major` hint.
+     * Used for informational notices — never implies an automatic upgrade.
+     *
+     * The server sends `next_major` to older-family clients (e.g. 1.8.x) alongside the
+     * family-appropriate release, so comparing raw remote/local versions here would miss it.
+     *
+     * @return bool
+     */
+    public function isNextMajorAvailable(): bool
+    {
+        $next = $this->remote->getNextMajor();
+        if (!$next || empty($next['version'])) {
+            return false;
+        }
+
+        $localMajor = (int) explode('.', $this->getLocalVersion())[0];
+        $nextMajor  = (int) explode('.', (string) $next['version'])[0];
+
+        return $nextMajor > $localMajor;
+    }
+
+    /**
+     * Returns the next-major version advertised by the remote, or null when none is offered.
+     *
+     * @return string|null
+     */
+    public function getNextMajorVersion(): ?string
+    {
+        $next = $this->remote->getNextMajor();
+
+        return $next['version'] ?? null;
+    }
+
+    /**
+     * Returns the migration URL advertised by the remote alongside the next-major hint.
+     *
+     * @return string|null
+     */
+    public function getMigrationUrl(): ?string
+    {
+        $next = $this->remote->getNextMajor();
+
+        return $next['migration_url'] ?? null;
+    }
+
+    /**
+     * Returns true when the remote version belongs to a different release family than the local version.
+     *
+     * @return bool
+     */
+    private function isCrossFamilyUpgrade(): bool
+    {
+        return static::family($this->getLocalVersion()) !== static::family($this->getRemoteVersion());
+    }
+
+    /**
+     * The release family a version belongs to. Before 2.0 it is major.minor, because 1.8
+     * was a breaking line that a routine upgrade must never reach. From 2.0 on a minor
+     * release is an ordinary upgrade, so the family is the major version alone.
+     *
+     * @param string $version
+     * @return string
+     */
+    public static function family(string $version): string
+    {
+        $parts = explode('.', ltrim($version, 'vV'));
+        $major = (int) ($parts[0] ?? 0);
+
+        return $major >= 2 ? (string) $major : $major . '.' . ($parts[1] ?? '0');
     }
 
     /**
      * Checks if Grav is currently symbolically linked
-     * @return boolean True if Grav is symlinked, False otherwise.
+     *
+     * @return bool True if Grav is symlinked, False otherwise.
      */
-
     public function isSymlink()
     {
         return $this->remote->isSymlink();

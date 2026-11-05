@@ -1,13 +1,31 @@
 <?php
+
+/**
+ * @package    Grav\Common\GPM
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common\GPM\Common;
 
 use Grav\Common\Data\Data;
 
-class Package {
-
+/**
+ * @property string $name
+ */
+class Package implements \Stringable
+{
+    /** @var Data */
     protected $data;
 
-    public function __construct(Data $package, $type = null) {
+    /**
+     * Package constructor.
+     * @param Data $package
+     * @param string|null $type
+     */
+    public function __construct(Data $package, $type = null)
+    {
         $this->data = $package;
 
         if ($type) {
@@ -15,28 +33,66 @@ class Package {
         }
     }
 
-    public function getData() {
+    /**
+     * @return Data
+     */
+    public function getData()
+    {
         return $this->data;
     }
 
-    public function __get($key) {
+    /**
+     * @param string $key
+     * @return mixed
+     */
+    #[\ReturnTypeWillChange]
+    public function __get($key)
+    {
         return $this->data->get($key);
     }
 
-    public function __isset($key) {
-        return isset($this->data->$key);
+    /**
+     * @param string $key
+     * @return void
+     */
+    #[\ReturnTypeWillChange]
+    public function __set($key, mixed $value)
+    {
+        $this->data->set($key, $value);
     }
 
-    public function __toString() {
+    /**
+     * @param string $key
+     * @return bool
+     */
+    #[\ReturnTypeWillChange]
+    public function __isset($key)
+    {
+        return isset($this->data->{$key});
+    }
+
+    /**
+     * @return string
+     */
+    #[\ReturnTypeWillChange]
+    public function __toString(): string
+    {
         return $this->toJson();
     }
 
-    public function toJson() {
+    /**
+     * @return string
+     */
+    public function toJson()
+    {
         return $this->data->toJson();
     }
 
-    public function toArray() {
+    /**
+     * @return array
+     */
+    public function toArray()
+    {
         return $this->data->toArray();
     }
-
 }

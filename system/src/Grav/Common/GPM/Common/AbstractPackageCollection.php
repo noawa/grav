@@ -1,15 +1,28 @@
 <?php
+
+/**
+ * @package    Grav\Common\GPM
+ *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
+ */
+
 namespace Grav\Common\GPM\Common;
 
-use Grav\Common\GravTrait;
 use Grav\Common\Iterator;
 
-abstract class AbstractPackageCollection extends Iterator {
-
-    use GravTrait;
-
+/**
+ * Class AbstractPackageCollection
+ * @package Grav\Common\GPM\Common
+ */
+abstract class AbstractPackageCollection extends Iterator
+{
+    /** @var string */
     protected $type;
 
+    /**
+     * @return string
+     */
     public function toJson()
     {
         $items = [];
@@ -18,9 +31,12 @@ abstract class AbstractPackageCollection extends Iterator {
             $items[$name] = $package->toArray();
         }
 
-        return json_encode($items);
+        return json_encode($items, JSON_THROW_ON_ERROR);
     }
 
+    /**
+     * @return array
+     */
     public function toArray()
     {
         $items = [];

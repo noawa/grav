@@ -1,28 +1,48 @@
 <?php
-namespace Grav\Common\Page\Medium;
 
 /**
- * The Image medium holds information related to an individual image. These are then stored in the Media object.
+ * @package    Grav\Common\Page
  *
- * @author Grav
- * @license MIT
- *
+ * @copyright  Copyright (c) 2015 - 2026 Trilby Media, LLC. All rights reserved.
+ * @license    MIT License; see LICENSE file for details.
  */
-class StaticImageMedium extends Medium
+
+namespace Grav\Common\Page\Medium;
+
+use Grav\Common\Media\Interfaces\ImageMediaInterface;
+use Grav\Common\Media\Traits\ImageLoadingTrait;
+use Grav\Common\Media\Traits\StaticResizeTrait;
+
+/**
+ * Class StaticImageMedium
+ * @package Grav\Common\Page\Medium
+ */
+class StaticImageMedium extends Medium implements ImageMediaInterface
 {
     use StaticResizeTrait;
+    use ImageLoadingTrait;
 
     /**
      * Parsedown element for source display mode
      *
      * @param  array $attributes
-     * @param  boolean $reset
+     * @param  bool $reset
      * @return array
      */
     protected function sourceParsedownElement(array $attributes, $reset = true)
     {
-        empty($attributes['src']) && $attributes['src'] = $this->url($reset);
+        if (empty($attributes['src'])) {
+            $attributes['src'] = $this->url($reset);
+        }
 
-        return [ 'name' => 'image', 'attributes' => $attributes ];
+        return ['name' => 'img', 'attributes' => $attributes];
+    }
+
+    /**
+     * @return $this
+     */
+    public function higherQualityAlternative()
+    {
+        return $this;
     }
 }
